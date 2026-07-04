@@ -1,5 +1,5 @@
 ---
-title: "Troubleshoot the Wazuh Docker Stack"
+title: "Troubleshooting Common Issues in the Wazuh Docker Stack"
 sidebarTitle: "Troubleshooting"
 description: "Diagnose and resolve common issues with the Wazuh Docker Stack: startup failures, agent connectivity, certificate errors, and performance problems."
 ---
@@ -104,7 +104,7 @@ This page covers common problems encountered when deploying and operating the Wa
     docker exec wazuh.manager /var/ossec/bin/wazuh-control status
 
     # Check registered agents from the Manager API
-    TOKEN=$(curl -k -s -u "wazuh-wui:MyS3cr37P450r.*-" \
+    TOKEN=$(curl -k -s -u "wazuh-wui:<your-password>" \
       -X POST "https://localhost:55000/security/user/authenticate?raw=true")
     curl -k -s -H "Authorization: Bearer $TOKEN" \
       https://localhost:55000/agents | python3 -m json.tool
@@ -166,7 +166,7 @@ This page covers common problems encountered when deploying and operating the Wa
     **Symptom:** Queries to the Indexer return `401 Unauthorized`:
 
     ```bash
-    curl -k -u admin:SecretPassword https://localhost:9200
+    curl -k -u admin:<your-password> https://localhost:9200
     # {"status":401,"error":"..."}
     ```
 
@@ -221,13 +221,7 @@ This page covers common problems encountered when deploying and operating the Wa
     openssl rand -base64 18 | tr -d '$/'
     ```
 
-    Update `.env`:
-
-    ```bash
-    API_PASSWORD=NewSafePasswordWithout$
-    ```
-
-    Then re-run:
+    Update `.env` with the new value, then re-run:
 
     ```bash
     sudo bash scripts/wazuh-dev.sh server up
@@ -323,7 +317,7 @@ This page covers common problems encountered when deploying and operating the Wa
   <Accordion title="Wazuh Dashboard takes a long time to load">
     **Symptom:** After starting the stack, the Dashboard at `https://<host>:6443` takes 1–2 minutes to respond or shows a blank page / loading spinner before becoming usable.
 
-    **Cause:** This is expected behavior on first start. The OpenSearch (Indexer) initialization sequence — security plugin bootstrapping, index template loading, and cluster health check — must complete before the Dashboard can establish a working connection. The Dashboard's health check (`curl -sk https://localhost:5601/api/status`) is configured with `retries: 10` and `interval: 10s`, giving OpenSearch up to ~100 seconds to become ready.
+    **Cause:** This is expected behavior on first start. The OpenSearch (Indexer) initialization sequence — security plugin bootstrapping, index template loading, and cluster health check — must complete before the Dashboard can establish a working connection. The Dashboard's internal health check endpoint runs on port `5601` inside the container (mapped to host port `6443`) and is configured with `retries: 10` and `interval: 10s`, giving OpenSearch up to ~100 seconds to become ready.
 
     **Diagnosis:**
 
@@ -331,11 +325,11 @@ This page covers common problems encountered when deploying and operating the Wa
     # Check Dashboard container health status
     sudo docker compose ps wazuh.dashboard
 
-    # Poll the Dashboard status endpoint directly
-    curl -sk https://localhost:5601/api/status | python3 -m json.tool
+    # Poll the Dashboard status endpoint from the host
+    curl -sk https://localhost:6443/api/status | python3 -m json.tool
 
     # Check Indexer cluster health — wait for "status": "green"
-    curl -k -u admin:SecretPassword \
+    curl -k -u admin:<your-password> \
       https://localhost:9200/_cluster/health?pretty
 
     # Watch all container health statuses in real time

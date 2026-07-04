@@ -1,7 +1,7 @@
 ---
-title: "Configure the Wazuh Dashboard and API Connection"
+title: "Wazuh Dashboard 4.14.5: Configuration Reference Guide"
 sidebarTitle: "Dashboard"
-description: "Reference for opensearch_dashboards.yml and wazuh.yml, covering TLS setup, session management, and the Manager API connection used by the Wazuh Dashboard."
+description: "Wazuh Dashboard configuration reference for opensearch_dashboards.yml and wazuh.yml covering TLS, session management, and the Manager API connection."
 ---
 
 The Wazuh Dashboard is a Wazuh-customized OpenSearch Dashboards instance that provides the web UI for alert exploration, agent management, SCA results, vulnerability reports, and configuration assessment. Two configuration files control its behaviour: `config/wazuh_dashboard/opensearch_dashboards.yml` (server settings and the connection to the Wazuh Indexer) and `config/wazuh_dashboard/wazuh.yml` (the connection settings for the Wazuh Manager REST API). Both files are bind-mounted into the `wazuh.dashboard` container — changes require a container restart.
@@ -98,7 +98,7 @@ hosts:
       url: "https://wazuh.manager"
       port: 55000
       username: wazuh-wui
-      password: T6G.2026#frank.w
+      password: <your-api-password>
       run_as: false
 ```
 

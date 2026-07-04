@@ -1,7 +1,7 @@
 ---
-title: "Configure the Wazuh Indexer: OpenSearch Settings"
+title: "Wazuh Indexer 4.14.5: OpenSearch Configuration Reference"
 sidebarTitle: "Indexer"
-description: "Reference for config/wazuh_indexer/wazuh.indexer.yml and internal_users.yml, covering network, TLS, security plugins, and user management for the Wazuh Indexer."
+description: "OpenSearch indexer configuration reference for wazuh.indexer.yml and internal_users.yml, covering TLS, security plugin, and built-in user management."
 ---
 
 The Wazuh Indexer is an OpenSearch single-node instance that stores alerts, inventory data, vulnerability reports, and FIM events. Its configuration is split across two files: `config/wazuh_indexer/wazuh.indexer.yml` (main OpenSearch configuration) and `config/wazuh_indexer/internal_users.yml` (the built-in user database). Both files are bind-mounted into the `wazuh.indexer` container at startup — changes require a container restart to take effect.

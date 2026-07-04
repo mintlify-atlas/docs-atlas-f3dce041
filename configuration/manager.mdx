@@ -1,7 +1,7 @@
 ---
-title: "Configure the Wazuh Manager: ossec.conf Reference"
+title: "Wazuh Manager 4.14.5: ossec.conf Configuration Reference"
 sidebarTitle: "Manager"
-description: "Reference guide for config/wazuh_cluster/wazuh_manager.conf covering global settings, FIM, SCA, vulnerability detection, active response, and cluster configuration."
+description: "Wazuh Manager ossec.conf reference: global, alerts, remote, rootcheck, wodles, SCA, vuln-detection, FIM, auth, and cluster settings."
 ---
 
 The Wazuh Manager's primary configuration file lives at `config/wazuh_cluster/wazuh_manager.conf` in the repository. It is bind-mounted into the `wazuh.manager` container at `/wazuh-config-mount/etc/ossec.conf`. Any change to this file requires a container restart to take effect:
@@ -72,6 +72,14 @@ The file is composed of multiple `<ossec_config>` blocks, each grouping related 
     Port 1514/TCP must be reachable from all agent hosts. In the Docker Compose stack this port is published on the host and agents connect to it directly.
   </Accordion>
 
+  <Accordion title="Internal Logging (&#60;logging&#62;)">
+    The `<logging>` block controls the format of Wazuh's own internal log output written to `/var/ossec/logs/ossec.log`.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `log_format` | `plain` | Write internal logs in plain text format. Alternatives are `json` or `plain,json` |
+  </Accordion>
+
   <Accordion title="Rootcheck (Policy Monitoring)">
     Rootcheck performs host-based anomaly and policy checks — scanning for rootkits, suspicious files, hidden processes, and configuration issues.
 
@@ -89,6 +97,16 @@ The file is composed of multiple `<ossec_config>` blocks, each grouping related 
     | `rootkit_files` | `etc/rootcheck/rootkit_files.txt` | Rootkit file signatures database |
     | `rootkit_trojans` | `etc/rootcheck/rootkit_trojans.txt` | Trojan signatures database |
     | `skip_nfs` | `yes` | Skip NFS-mounted directories to avoid slow scans |
+  </Accordion>
+
+  <Accordion title="Docker Listener Wodle">
+    The `docker-listener` wodle subscribes to the Docker daemon event stream on the Manager host and forwards container lifecycle events directly to the Indexer as Wazuh alerts.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `disabled` | `no` | Docker event monitoring is active |
+
+    Container `start`, `stop`, `die`, `pause`, and `unpause` events from the host are captured without requiring a separate Wazuh agent on the Docker host.
   </Accordion>
 
   <Accordion title="System Inventory (syscollector wodle)">
@@ -301,6 +319,7 @@ The file is composed of multiple `<ossec_config>` blocks, each grouping related 
     | `name` | `wazuh` | Cluster name — must match on all nodes |
     | `node_name` | `node01` | Unique name for this node |
     | `node_type` | `master` | This node is the cluster master |
+    | `key` | `<cluster-key>` | Shared secret key for inter-node authentication — must be identical on all cluster nodes |
     | `port` | `1516` | TCP port for inter-node cluster communication |
     | `bind_addr` | `0.0.0.0` | Listen on all interfaces |
     | `nodes > node` | `wazuh.manager` | List of cluster node addresses |
@@ -617,7 +636,7 @@ The complete `wazuh_manager.conf` for reference:
     <name>wazuh</name>
     <node_name>node01</node_name>
     <node_type>master</node_type>
-    <key>aa093264ef885029653eea20dfcf51ae</key>
+    <key><cluster-key></key>
     <port>1516</port>
     <bind_addr>0.0.0.0</bind_addr>
     <nodes>

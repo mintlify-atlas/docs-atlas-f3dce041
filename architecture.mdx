@@ -1,7 +1,7 @@
 ---
 title: "Wazuh Stack Architecture and Component Data Flow"
 sidebarTitle: "Architecture"
-description: "Explore the Wazuh Docker Stack's four-component architecture, inter-service communication, network topology, certificate layout, and Docker volume structure."
+description: "Explore the Wazuh Docker Stack's four-component architecture, inter-service communication, network topology, TLS certificate layout, and volume structure."
 ---
 
 The Wazuh Docker Stack is a single-node deployment in which all four services — Indexer, Manager, Dashboard, and Agent — run as individual containers on a shared Docker internal network. There is no external load balancer, no Kubernetes orchestration, and no multi-node clustering: every component resolves its peers by Docker hostname (e.g., `wazuh.manager`, `wazuh.indexer`, `wazuh.dashboard`). All inter-service communication is secured with mutual TLS certificates generated at deployment time by the `wazuh/wazuh-certs-generator:0.0.3` image. The Manager forwards processed alerts to the Indexer using an embedded Filebeat instance with full certificate verification. This architecture delivers a complete, self-contained security monitoring environment that is reproducible across environments and upgradeable by replacing image tags in `docker-compose.yml`.
@@ -94,7 +94,7 @@ nodes:
 The generator writes the following certificate files into `./config/wazuh_indexer_ssl_certs/`:
 
 | File | Used By | Purpose |
-|------|---------|---------|
+|------|---------|---------| 
 | `root-ca.pem` | Indexer, Dashboard | Root Certificate Authority — shared trust anchor for Indexer and Dashboard |
 | `root-ca-manager.pem` | Manager (Filebeat) | Copy of the Root CA mounted as the Filebeat CA bundle |
 | `wazuh.indexer.pem` | Indexer | Indexer node TLS certificate (public) |
@@ -126,7 +126,7 @@ The following describes how security event data moves through the stack from col
 
 ## Volume Architecture
 
-All named volumes in the stack use Docker's default local driver and persist automatically across container restarts and upgrades:
+All 15 named volumes in the stack use Docker's default local driver and persist automatically across container restarts and upgrades:
 
 | Volume Name | Mounted In | Internal Container Path | Purpose |
 |-------------|-----------|------------------------|---------|
@@ -144,6 +144,7 @@ All named volumes in the stack use Docker's default local driver and persist aut
 | `wazuh-indexer-data` | `wazuh.indexer` | `/var/lib/wazuh-indexer` | OpenSearch data directory — all indexed alert documents and metadata |
 | `wazuh-dashboard-config` | `wazuh.dashboard` | `/usr/share/wazuh-dashboard/data/wazuh/config` | Persistent Dashboard settings, saved API hosts, and plugin configuration |
 | `wazuh-dashboard-custom` | `wazuh.dashboard` | `/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom` | Custom branding assets such as logos and CSS overrides |
+| `wazuh_https_certs` | _(reserved)_ | — | Reserved volume for HTTPS certificate storage |
 
 ## Health Checks
 

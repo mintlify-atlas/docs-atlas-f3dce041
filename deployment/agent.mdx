@@ -1,7 +1,7 @@
 ---
-title: "Deploy a Wazuh Agent to Monitor Remote Hosts"
+title: "Deploy a Wazuh 4.14.1 Agent to Monitor Remote Hosts"
 sidebarTitle: "Agent"
-description: "Connect a Wazuh 4.14.1 agent to the Manager — run it as a Docker container on a remote host or install it natively on Linux with Docker monitoring enabled."
+description: "Connect a Wazuh 4.14.1 agent to the Manager — run it as a Docker container on a remote host or install natively on Linux with Docker monitoring enabled."
 ---
 
 The Wazuh agent collects system events, file-integrity changes, log entries, and Docker container events from a monitored host and forwards them to the Wazuh Manager over TCP port 1514. Enrollment (registration) happens automatically over TCP port 1515 using the Manager's `authd` service. Two deployment styles are supported: a containerised agent run via Docker Compose on any host with Docker installed, and a native `dpkg`-installed agent for Linux hosts where you prefer a system service.
@@ -58,6 +58,10 @@ The Wazuh agent collects system events, file-integrity changes, log entries, and
           - TZ=${TZ}
           - /sys:/sys:ro
     ```
+
+    <Note>
+      The `- TZ=${TZ}` entry appears under `volumes` in the source file — this is a misplacement in the Compose definition. Docker Compose silently ignores invalid volume entries of this form. If you need the container timezone to be set, move `TZ: ${TZ}` to the `environment` block instead.
+    </Note>
 
     ### Required Environment Variables
 

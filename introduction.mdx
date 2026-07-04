@@ -4,7 +4,7 @@ sidebarTitle: "Introduction"
 description: "Learn what Wazuh Docker Stack is, what components it includes, and how it delivers production-grade security monitoring for containerized environments."
 ---
 
-The Wazuh Docker Stack is a fully containerized, production-ready security monitoring platform built on **Wazuh 4.14.5** and orchestrated with Docker Compose for the **Simovilab** environment. It bundles all four core Wazuh components — Indexer, Manager, Dashboard, and Agent — into a single `docker-compose.yml` file, backed by persistent named volumes and mutual TLS authentication between services. Every image is sourced directly from the official `wazuh/*` Docker Hub registry, so no custom builds, Dockerfiles, or image registries are required to get started. The stack is designed to run on a single Linux host, making it ideal for lab environments, on-premises deployments, and development setups that demand real security-event collection without the overhead of a full cluster.
+The Wazuh Docker Stack is a fully containerized, production-ready security monitoring platform built on **Wazuh 4.14.5** and orchestrated with Docker Compose for the **Simovilab** environment. It bundles all four core Wazuh components — Indexer, Manager, Dashboard, and Agent — into a single `docker-compose.yml` file, backed by 15 persistent named volumes and mutual TLS authentication between services. Every image is sourced directly from the official `wazuh/*` Docker Hub registry, so no custom builds, Dockerfiles, or image registries are required to get started. The stack is designed to run on a single Linux host, making it ideal for lab environments, on-premises deployments, and development setups that demand real security-event collection without the overhead of a full cluster.
 
 <Note>
   The stack uses only official `wazuh/*` images pulled directly from Docker Hub — `wazuh/wazuh-indexer:4.14.5`, `wazuh/wazuh-manager:4.14.5`, `wazuh/wazuh-dashboard:4.14.5`, and `wazuh/wazuh-agent:4.14.5`. No custom builds or private image registries are required.
@@ -42,7 +42,7 @@ The Wazuh Docker Stack is a fully containerized, production-ready security monit
 All network bindings are defined in `docker-compose.yml`. The following ports must be available on the host:
 
 | Port | Protocol | Service | Purpose |
-|------|----------|---------|---------|
+|------|----------|---------|---------| 
 | `1514` | TCP | Wazuh Manager | Agent event forwarding — agents ship collected logs and events to the Manager |
 | `1515` | TCP | Wazuh Manager | Agent registration and authentication — new agents enroll through this port |
 | `514` | UDP | Wazuh Manager | Syslog ingestion — network devices and external systems send syslog messages |
@@ -52,7 +52,7 @@ All network bindings are defined in `docker-compose.yml`. The following ports mu
 
 ## Persistent Volumes
 
-All data survives container restarts and upgrades through Docker named volumes. The following volumes are declared in `docker-compose.yml`:
+All data survives container restarts and upgrades through Docker named volumes. The following 15 volumes are declared in `docker-compose.yml`:
 
 | Volume Name | Container | Internal Path | Purpose |
 |-------------|-----------|---------------|---------|
@@ -70,6 +70,7 @@ All data survives container restarts and upgrades through Docker named volumes. 
 | `wazuh-indexer-data` | `wazuh.indexer` | `/var/lib/wazuh-indexer` | OpenSearch index data — all stored alerts and event documents |
 | `wazuh-dashboard-config` | `wazuh.dashboard` | `/usr/share/wazuh-dashboard/data/wazuh/config` | Dashboard persistent configuration (API credentials, settings) |
 | `wazuh-dashboard-custom` | `wazuh.dashboard` | `/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom` | Custom branding assets (logos, CSS overrides) |
+| `wazuh_https_certs` | _(reserved)_ | — | Reserved volume for HTTPS certificate storage |
 
 ## Prerequisites
 

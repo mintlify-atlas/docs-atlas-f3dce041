@@ -52,6 +52,10 @@ This page walks through the complete deployment of the Wazuh Docker Stack from r
     | `NETWORK` | `net_00` | Name of the Docker internal network created for inter-service communication |
     | `SUBNET` | `10.60.60.0/24` | CIDR block for the Docker internal network |
     | `GATEWAY` | `10.60.60.1` | Gateway address for the Docker internal network |
+    | `PROJECT_ROOT` | `.` | Path to the repository root used as the Compose project base directory |
+    | `NGINX_IMAGE` | `nginx:1.29.3-alpine` | NGINX image tag — used when a reverse proxy is added in front of the Dashboard |
+    | `GENERATE_INDEXER_FILE` | `generate-indexer-certs.yml` | Filename of the Compose override used to run the certificate generator container |
+    | `TZ` | _(not set)_ | POSIX timezone string (e.g., `Europe/Madrid`) injected into all containers for consistent log timestamps |
     | `DOCKER_GID` | _(auto-detected)_ | Docker group ID on the host — automatically resolved by `wazuh-dev.sh` via `getent group docker`; set manually if deploying without the script |
     | `LOCAL_AGENT_HOSTNAME` | _(host FQDN)_ | Hostname assigned to the `wazuh.agent` container; if set to `localhost`, the script substitutes the actual host FQDN using `hostname -f` |
     | `MY_USERNAME` | _(not set)_ | Username for a custom administrative user to be created or updated in the Indexer's `internal_users.yml` |
@@ -69,7 +73,7 @@ This page walks through the complete deployment of the Wazuh Docker Stack from r
 
     This command runs the `wazuh/wazuh-certs-generator:0.0.3` container, which reads the node definitions from `config/certs.yml` and outputs the following certificate files into `./config/wazuh_indexer_ssl_certs/`:
 
-    - `root-ca.pem` and `root-ca.pem` (shared CA)
+    - `root-ca.pem` (shared CA for Indexer and Dashboard)
     - `root-ca-manager.pem` (CA copy for the Manager's Filebeat)
     - `wazuh.indexer.pem` / `wazuh.indexer-key.pem`
     - `wazuh.manager.pem` / `wazuh.manager-key.pem`
@@ -98,7 +102,15 @@ This page walks through the complete deployment of the Wazuh Docker Stack from r
     8. **Generates TLS certificates** — runs `docker compose -f generate-indexer-certs.yml run --rm generator`
     9. **Starts the stack** — executes `docker compose -f docker-compose.yml --env-file .env up -d`
 
-    The `server` argument selects `docker-compose.yml` (the full four-service stack). Use `agent` to deploy only the agent via `agent/docker-compose-agent.yml`.
+    The `server` argument selects `docker-compose.yml` (the full four-service stack). Use `agent` to deploy only the agent via `agent/docker-compose-agent.yml`. The second argument controls the Compose action and defaults to `up` when omitted; all supported actions are listed below.
+
+    | Action | Command | Description |
+    |--------|---------|-------------|
+    | `up` | `bash scripts/wazuh-dev.sh server up` | Start the stack in detached mode (default) |
+    | `down` | `bash scripts/wazuh-dev.sh server down` | Stop and remove all containers |
+    | `logs` | `bash scripts/wazuh-dev.sh server logs` | Tail logs for all services |
+    | `ps` | `bash scripts/wazuh-dev.sh server ps` | Show container status |
+    | `restart` | `bash scripts/wazuh-dev.sh server restart` | Restart all running containers |
   </Step>
 
   <Step title="Verify the Stack">

@@ -1,5 +1,5 @@
 ---
-title: "Wazuh Docker Stack Administration Commands"
+title: "Wazuh Docker Stack: Admin Commands and API Reference"
 sidebarTitle: "Admin Commands"
 description: "Reference of Docker Compose and wazuh-dev.sh commands for managing the Wazuh stack lifecycle, inspecting logs, and querying the Manager and Indexer APIs."
 ---
@@ -42,14 +42,14 @@ sudo bash scripts/wazuh-dev.sh agent up
 
 When you run `sudo bash scripts/wazuh-dev.sh server up`, the script performs the following steps in order:
 
-1. **Dependency check** — verifies `docker` and `curl` are installed and on `PATH`.
-2. **`.env` validation** — checks that a `.env` file exists; if not, copies `.env.example` as a starting point and exits with a warning.
-3. **Compose file check** — confirms `docker-compose.yml` is present in the repo root.
-4. **`internal_users.yml` check** — confirms `config/wazuh_indexer/internal_users.yml` exists.
-5. **Cert file check** — confirms `generate-indexer-certs.yml` is present.
-6. **Post-install script check** — validates that `SCRIPT_POST_INSTALL` from `.env` points to an existing file.
-7. **Docker GID detection** — runs `getent group docker | cut -d: -f3` to find the host Docker group ID and exports it as `DOCKER_GID` so the agent container can access `/var/run/docker.sock`.
-8. **`vm.max_map_count` enforcement** — reads `/proc/sys/vm/max_map_count`; if the value is below `262144`, runs `sysctl -w vm.max_map_count=262144` to satisfy OpenSearch requirements.
+1. **Docker GID detection** — runs `getent group docker | cut -d: -f3` to find the host Docker group ID and exports it as `DOCKER_GID` so the agent container can access `/var/run/docker.sock`.
+2. **`vm.max_map_count` enforcement** — reads `/proc/sys/vm/max_map_count`; if the value is below `262144`, runs `sysctl -w vm.max_map_count=262144` to satisfy OpenSearch requirements.
+3. **Dependency check** — verifies `docker` and `curl` are installed and on `PATH`.
+4. **`.env` validation** — checks that a `.env` file exists; if not, copies `.env.example` as a starting point and exits with a warning.
+5. **Compose file check** — confirms `docker-compose.yml` is present in the repo root.
+6. **`internal_users.yml` check** — confirms `config/wazuh_indexer/internal_users.yml` exists.
+7. **Cert file check** — confirms `generate-indexer-certs.yml` is present.
+8. **Post-install script check** — validates that `SCRIPT_POST_INSTALL` from `.env` points to an existing file (server mode only).
 9. **Agent hostname resolution** — reads `LOCAL_AGENT_HOSTNAME` from `.env`; if the value is `localhost`, replaces it with the actual FQDN from `hostname -f`.
 10. **`$` character validation** — exits with an error if `API_PASSWORD` or `API_USERNAME` in `.env` contain the `$` character (unsupported by the sed-based substitution).
 11. **`wazuh.yml` credential sync** — updates `config/wazuh_dashboard/wazuh.yml` with the `API_USERNAME` and `API_PASSWORD` values from `.env` using `sed` in-place substitution.
@@ -112,20 +112,13 @@ sudo docker compose logs --tail=100 wazuh.manager
 
 ## Wazuh REST API
 
-The Wazuh Manager exposes a REST API on port `55000`. Authentication is a two-step process: first POST to `/security/user/authenticate` with HTTP Basic credentials to receive a short-lived JWT token, then supply that token as a `Bearer` header on subsequent requests.
+The Wazuh Manager exposes a REST API on port `55000`. Authentication is a two-step process: first POST to `/security/user/authenticate?raw=true` with HTTP Basic credentials to receive a short-lived JWT token, then supply that token as a `Bearer` header on subsequent requests.
 
-The default API credentials defined in `.env.example` are:
-
-| Variable | Example Value |
-|---|---|
-| `API_USERNAME` | `wazuh-wui` |
-| `API_PASSWORD` | `MyS3cr37P450r.*-` |
-
-Replace these with the values you have set in your `.env` before running the commands below.
+The API credentials are set via the `API_USERNAME` and `API_PASSWORD` variables in your `.env` file. Replace `<your-password>` in the examples below with your actual `API_PASSWORD` value.
 
 ```bash
 # Authenticate and capture the JWT token
-TOKEN=$(curl -k -s -u "wazuh-wui:MyS3cr37P450r.*-" \
+TOKEN=$(curl -k -s -u "wazuh-wui:<your-password>" \
   -X POST "https://localhost:55000/security/user/authenticate?raw=true")
 
 # List all registered agents
@@ -176,23 +169,23 @@ A `200` response means authentication succeeded; a `401` means the API is up but
 
 ## Wazuh Indexer API
 
-The Wazuh Indexer (OpenSearch) exposes its HTTP API on port `9200`. Authentication uses the `admin` user configured in `config/wazuh_indexer/internal_users.yml`. Replace `SecretPassword` with your actual `INDEXER_PASSWORD` value from `.env`.
+The Wazuh Indexer (OpenSearch) exposes its HTTP API on port `9200`. Authentication uses the `admin` user configured in `config/wazuh_indexer/internal_users.yml`. Replace `<your-password>` with your actual `INDEXER_PASSWORD` value from `.env`.
 
 ```bash
 # Check overall cluster health (green/yellow/red)
-curl -k -u admin:SecretPassword \
+curl -k -u admin:<your-password> \
   https://localhost:9200/_cluster/health?pretty
 
 # List all Wazuh indices with document counts and sizes
-curl -k -u admin:SecretPassword \
+curl -k -u admin:<your-password> \
   https://localhost:9200/_cat/indices/wazuh*?v
 
 # Check node information
-curl -k -u admin:SecretPassword \
+curl -k -u admin:<your-password> \
   https://localhost:9200/_nodes?pretty
 
 # Check index templates (useful for schema debugging)
-curl -k -u admin:SecretPassword \
+curl -k -u admin:<your-password> \
   https://localhost:9200/_cat/templates/wazuh*?v
 ```
 
@@ -227,7 +220,7 @@ docker exec wazuh.indexer java -version
 
 ## Data Backup and Restore
 
-All persistent data lives in named Docker volumes defined in `docker-compose.yml`. Back up volumes by mounting them alongside a scratch Alpine container.
+All persistent data lives in named Docker volumes defined in `docker-compose.yml`. The stack defines 15 named volumes: `wazuh_api_configuration`, `wazuh_etc`, `wazuh_logs`, `wazuh_queue`, `wazuh_var_multigroups`, `wazuh_integrations`, `wazuh_active_response`, `wazuh_agentless`, `wazuh_wodles`, `filebeat_etc`, `filebeat_var`, `wazuh-indexer-data`, `wazuh-dashboard-config`, `wazuh-dashboard-custom`, and `wazuh_https_certs`. Back up volumes by mounting them alongside a scratch Alpine container.
 
 ```bash
 # Backup Manager configuration volume (wazuh_etc) to a local tar.gz

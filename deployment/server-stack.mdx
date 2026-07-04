@@ -1,7 +1,7 @@
 ---
-title: "Deploy the Wazuh Server Stack with Docker Compose"
+title: "Deploy the Wazuh 4.14.5 Server Stack via Docker Compose"
 sidebarTitle: "Server Stack"
-description: "Deploy Wazuh Indexer, Manager, and Dashboard services using docker-compose.yml or the wazuh-dev.sh script, with pre-deployment checks and resource guidance."
+description: "Deploy Wazuh Indexer, Manager, and Dashboard using docker-compose.yml or the wazuh-dev.sh script, with pre-deployment checks and resource guidance."
 ---
 
 This page walks you through deploying the three server-side Wazuh components — **Wazuh Indexer** (OpenSearch-based data store), **Wazuh Manager** (analysis and correlation engine with Filebeat), and **Wazuh Dashboard** (web UI) — as Docker Compose services on a single host. You can use the convenience script `wazuh-dev.sh` for a guided deployment, or follow the manual steps to drive each stage yourself.
@@ -97,7 +97,11 @@ If you prefer to control each step individually, follow the sequence below.
     ```bash
     sudo docker compose ps
     ```
-    The Indexer health check polls `https://localhost:9200` with `INDEXER_USERNAME`/`INDEXER_PASSWORD` credentials. The Manager and Dashboard health checks each poll their respective HTTPS endpoints. Allow up to two minutes for all three services to become healthy on first boot.
+    The Indexer health check polls `https://localhost:9200` with `INDEXER_USERNAME`/`INDEXER_PASSWORD` credentials (interval 30 s, timeout 10 s, 3 retries, start period 30 s). The Manager polls `https://localhost:55000` and the Dashboard polls `https://localhost:5601/api/status` (both at 10 s interval, 10 s timeout, 10 retries). Allow up to two minutes for all three services to become healthy on first boot.
+
+    <Note>
+      The `depends_on` directives for all three services are **commented out** in `docker-compose.yml`. This means Docker Compose starts the Indexer, Manager, and Dashboard concurrently without waiting for upstream health checks. The Manager and Dashboard may log transient connection errors during startup until the Indexer is ready — this is expected behaviour. Uncomment the `depends_on` blocks if your environment requires strict start ordering.
+    </Note>
   </Step>
 </Steps>
 

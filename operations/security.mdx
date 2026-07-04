@@ -1,5 +1,5 @@
 ---
-title: "Security Hardening for the Wazuh Docker Stack"
+title: "Security Hardening Guide for the Wazuh Docker Stack"
 sidebarTitle: "Security"
 description: "Security hardening checklist for production Wazuh deployments: credential rotation, firewall configuration, TLS, volume permissions, and access controls."
 ---
@@ -183,7 +183,7 @@ ls -la .env config/wazuh_dashboard/wazuh.yml config/wazuh_indexer_ssl_certs/
 
 - Add `.env` to `.gitignore` — it must never be committed.
 - Add `config/wazuh_indexer_ssl_certs/` to `.gitignore` — private keys must never be committed.
-- The `.env.example` file is safe to commit as a template (it contains only illustrative placeholder values).
+- The `.env.example` file is safe to commit as a template (replace all real credential values with `<strong-password>` placeholders before committing).
 
 ---
 
@@ -209,7 +209,7 @@ To add your management jump host or admin subnet, append additional `<white_list
   <white_list>^localhost.localdomain$</white_list>
   <!-- Add management IPs to prevent accidental firewall-drop -->
   <white_list>10.20.203.5</white_list>
-  <white_list>^admin-jumphost.simovilab.local$</white_list>
+  <white_list>^admin-jumphost.example.local$</white_list>
 </global>
 ```
 
