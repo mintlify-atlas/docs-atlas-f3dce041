@@ -1,0 +1,178 @@
+---
+title: "Generate TLS Certificates for the Wazuh Stack"
+sidebarTitle: "Certificates"
+description: "Use the Wazuh certificate generator to produce all inter-service TLS certificates required by the Indexer, Manager, and Dashboard before first deployment."
+---
+
+The Wazuh stack enforces mutual TLS for every inter-service connection: the Indexer exposes its REST API over HTTPS, Filebeat inside the Manager ships events to the Indexer over TLS, and the Dashboard presents a TLS-secured web interface. All certificates are generated from a single topology file — `config/certs.yml` — using the official `wazuh/wazuh-certs-generator:0.0.3` image. The generator must be run **before** the stack is started for the first time, because the service containers mount the certificate files at startup.
+
+<Warning>
+  The certificates produced by this generator are **self-signed**. Browsers will display a security warning when accessing the Wazuh Dashboard. For internet-facing or regulated environments, replace the generated certificates with those issued by Let's Encrypt or your corporate CA, and update the volume mounts in `docker-compose.yml` accordingly.
+</Warning>
+
+---
+
+## Certificate Node Topology
+
+The generator reads its node topology from `config/certs.yml`. The file for this deployment is:
+
+```yaml
+nodes:
+  # Wazuh indexer server nodes
+  indexer:
+    - name: wazuh.indexer
+      ip: wazuh.indexer
+
+  # Wazuh server nodes
+  # Use node_type only with more than one Wazuh manager
+  server:
+    - name: wazuh.manager
+      ip: wazuh.manager
+
+  # Wazuh dashboard node
+  dashboard:
+    - name: wazuh.dashboard
+      ip: wazuh.dashboard
+```
+
+Each section maps to a role in the stack:
+
+| Section | Node Name | Purpose |
+|---------|-----------|---------|
+| `indexer` | `wazuh.indexer` | OpenSearch data node — issues a server certificate for the Indexer's REST API and inter-node transport |
+| `server` | `wazuh.manager` | Wazuh Manager — issues a Filebeat client certificate used to authenticate to the Indexer |
+| `dashboard` | `wazuh.dashboard` | Wazuh Dashboard — issues a server certificate for the HTTPS web interface |
+
+The `ip` fields are set to the Docker service hostnames (`wazuh.indexer`, `wazuh.manager`, `wazuh.dashboard`) rather than numeric IPs. Docker's internal DNS resolves these names within the Compose network, so the Subject Alternative Names in each certificate match the hostnames used by the other services.
+
+---
+
+## Generating Certificates
+
+Run the generator with a single command from the project root:
+
+```bash
+sudo docker compose -f generate-indexer-certs.yml run --rm generator
+```
+
+This command starts the `wazuh/wazuh-certs-generator:0.0.3` container with the following configuration taken from `generate-indexer-certs.yml`:
+
+```yaml
+services:
+  generator:
+    image: wazuh/wazuh-certs-generator:0.0.3
+    hostname: wazuh-certs-generator
+    environment:
+      - CERT_TOOL_VERSION=4.14
+      - TZ=${TZ}
+    volumes:
+      - ./config/wazuh_indexer_ssl_certs/:/certificates/
+      - ./config/certs.yml:/config/certs.yml
+```
+
+- **`CERT_TOOL_VERSION=4.14`** — instructs the generator to use certificate profiles matching Wazuh 4.14.
+- **Output directory** — the container writes all certificate files into `./config/wazuh_indexer_ssl_certs/` on the host (mounted at `/certificates/` inside the container).
+- **Input topology** — `./config/certs.yml` is mounted read-only at `/config/certs.yml` inside the container.
+
+The `--rm` flag removes the generator container as soon as it exits, leaving only the certificate files behind.
+
+---
+
+## Generated Certificate Files
+
+After the generator completes, the following files will be present in `./config/wazuh_indexer_ssl_certs/`:
+
+| File | Consuming Service | Purpose |
+|------|-------------------|---------|
+| `root-ca.pem` | Indexer, Dashboard | Root CA certificate — used to verify server and client certificates |
+| `root-ca-manager.pem` | Manager (Filebeat) | Separate root CA certificate for the Manager/Filebeat trust chain |
+| `wazuh.indexer.pem` | Indexer | Indexer node TLS server certificate |
+| `wazuh.indexer-key.pem` | Indexer | Indexer node TLS private key |
+| `wazuh.manager.pem` | Manager (Filebeat) | Filebeat client certificate for authenticating to the Indexer |
+| `wazuh.manager-key.pem` | Manager (Filebeat) | Filebeat client private key |
+| `wazuh.dashboard.pem` | Dashboard | Dashboard HTTPS server certificate |
+| `wazuh.dashboard-key.pem` | Dashboard | Dashboard HTTPS private key |
+| `admin.pem` | Indexer (security init) | OpenSearch admin client certificate — used to apply security configuration |
+| `admin-key.pem` | Indexer (security init) | OpenSearch admin client private key |
+
+---
+
+## Certificate Mounts in docker-compose.yml
+
+Each service mounts only the subset of certificates it needs. The relevant volume entries from `docker-compose.yml` are shown below.
+
+**Wazuh Indexer** — mounts the root CA, its own node certificate/key, and the admin certificate/key:
+
+```yaml
+volumes:
+  - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+  - ./config/wazuh_indexer_ssl_certs/wazuh.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/wazuh.indexer.key
+  - ./config/wazuh_indexer_ssl_certs/wazuh.indexer.pem:/usr/share/wazuh-indexer/config/certs/wazuh.indexer.pem
+  - ./config/wazuh_indexer_ssl_certs/admin.pem:/usr/share/wazuh-indexer/config/certs/admin.pem
+  - ./config/wazuh_indexer_ssl_certs/admin-key.pem:/usr/share/wazuh-indexer/config/certs/admin-key.pem
+```
+
+**Wazuh Manager** — mounts the manager-specific root CA and the Filebeat client certificate/key:
+
+```yaml
+volumes:
+  - ./config/wazuh_indexer_ssl_certs/root-ca-manager.pem:/etc/ssl/root-ca.pem
+  - ./config/wazuh_indexer_ssl_certs/wazuh.manager.pem:/etc/ssl/filebeat.pem
+  - ./config/wazuh_indexer_ssl_certs/wazuh.manager-key.pem:/etc/ssl/filebeat.key
+```
+
+The Manager also sets these SSL environment variables so Filebeat knows where to find them:
+
+```yaml
+environment:
+  - FILEBEAT_SSL_VERIFICATION_MODE=full
+  - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+  - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+  - SSL_KEY=/etc/ssl/filebeat.key
+```
+
+**Wazuh Dashboard** — mounts the root CA and the dashboard server certificate/key:
+
+```yaml
+volumes:
+  - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem
+  - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem
+  - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem
+```
+
+---
+
+## Regenerating Certificates
+
+You may need to regenerate certificates when rotating credentials, changing node hostnames, or after a compromised key. Follow these steps:
+
+<Steps>
+  <Step title="Stop the running stack">
+    ```bash
+    sudo docker compose down
+    ```
+  </Step>
+
+  <Step title="Delete the existing certificate directory">
+    ```bash
+    rm -rf ./config/wazuh_indexer_ssl_certs/
+    mkdir ./config/wazuh_indexer_ssl_certs/
+    ```
+  </Step>
+
+  <Step title="Re-run the certificate generator">
+    ```bash
+    sudo docker compose -f generate-indexer-certs.yml run --rm generator
+    ```
+  </Step>
+
+  <Step title="Restart the stack">
+    ```bash
+    sudo docker compose up -d
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Regenerating certificates requires a **full stack restart** because all three service containers read their certificate files from disk at startup — there is no mechanism to hot-reload TLS material without restarting the containers.
+</Note>

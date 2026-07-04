@@ -1,0 +1,171 @@
+---
+title: "Environment Variables Reference for Wazuh Docker Stack"
+sidebarTitle: "Environment Variables"
+description: "Complete reference for every .env variable consumed by the Wazuh Docker Compose stack, including network settings, credentials, and runtime options."
+---
+
+All runtime configuration for the Wazuh Docker Compose stack is driven by a single `.env` file located in the project root. Docker Compose reads this file automatically, and `wazuh-dev.sh` also sources it directly during its pre-deployment checks. Before your first deployment, copy the example file to `.env` and edit it with your environment's values:
+
+```bash
+cp .env.example .env
+```
+
+<Warning>
+  Never commit `.env` to version control — it contains plaintext credentials. The project's `.gitignore` should exclude it. Use `.env.example` as the committed template with placeholder values.
+</Warning>
+
+The full contents of `.env.example` are reproduced below for reference:
+
+```bash
+NGINX_IMAGE=nginx:1.29.3-alpine
+PROJECT_ROOT=.
+## VARIABLES DE ENTORNO ##
+NETWORK=net_00
+#VARIABLES PARA LAS CONFIGURACIONES DE RED net0
+SUBNET=10.60.60.0/24
+GATEWAY=10.60.60.1
+## CONTRASEÑAS ##
+## ACCESO A INDEXER PARA MANAGER Y DASHBOARD ##
+MANAGER_SERVER=10.20.203.5
+INDEXER_USERNAME=admin
+INDEXER_PASSWORD=_S1M0V1L48_T7G_2025_.*-
+## ACCESO A LA API
+API_USERNAME=wazuh-wui
+API_PASSWORD=MyS3cr37P450r.*-
+## ACCESO A LA INTERFAZ WEB ##
+#DASHBOARD_USERNAME=tfgadmin
+#DASHBOARD_PASSWORD=tfg12345
+DASHBOARD_USERNAME=kibanaserver
+DASHBOARD_PASSWORD=kibanaserver
+GENERATE_INDEXER_FILE=generate-indexer-certs.yml
+```
+
+---
+
+## Network Configuration
+
+<ParamField body="NETWORK" type="string" default="net_00">
+  Name of the Docker network created for the Wazuh stack. All services attach to this network so they can reach each other by hostname.
+</ParamField>
+
+<ParamField body="SUBNET" type="string" default="10.60.60.0/24">
+  CIDR block assigned to the Docker network. Choose a range that does not overlap with any existing networks on the host.
+</ParamField>
+
+<ParamField body="GATEWAY" type="string" default="10.60.60.1">
+  Gateway address for the Docker network subnet. Must fall within the `SUBNET` range.
+</ParamField>
+
+<ParamField body="PROJECT_ROOT" type="string" default=".">
+  Path to the project root directory. Used internally by `wazuh-dev.sh` when resolving relative file paths. The default `.` means "the directory from which the script is run," which should be the repo root.
+</ParamField>
+
+---
+
+## Server Address
+
+<ParamField body="MANAGER_SERVER" type="string" default="10.20.203.5">
+  The IP address or hostname of the host running the Wazuh Manager. Remote agent deployments use this value to point their `AGENT_MANAGER_SERVER` variable at the correct host. Update this to match your actual server address.
+</ParamField>
+
+---
+
+## Indexer Credentials
+
+<ParamField body="INDEXER_USERNAME" type="string" default="admin" required>
+  OpenSearch admin username. Used by both the Manager (via Filebeat) and the Dashboard to authenticate API requests to the Indexer on port 9200. Also used in the Indexer's own health check.
+</ParamField>
+
+<ParamField body="INDEXER_PASSWORD" type="string" required>
+  Password for `INDEXER_USERNAME`. The example value is `_S1M0V1L48_T7G_2025_.*-`. Change this to a strong, unique password in your deployment. Injected as an environment variable into the `wazuh.manager` and `wazuh.dashboard` containers.
+</ParamField>
+
+---
+
+## API Credentials
+
+<ParamField body="API_USERNAME" type="string" default="wazuh-wui" required>
+  Username for the Wazuh REST API. The Dashboard uses this credential to query the Manager API on port 55000. `wazuh-dev.sh` writes this value into `config/wazuh_dashboard/wazuh.yml` before deploying.
+</ParamField>
+
+<ParamField body="API_PASSWORD" type="string" required>
+  Password for `API_USERNAME`. The example value is `MyS3cr37P450r.*-`. This password is written into `config/wazuh_dashboard/wazuh.yml` by `wazuh-dev.sh` at deployment time.
+</ParamField>
+
+<Note>
+  The `$` character is **explicitly disallowed** in both `API_PASSWORD` and `API_USERNAME`. The `wazuh-dev.sh` script validates these values and exits with an error if a `$` is found, because the `sed` substitution used to write them into `wazuh.yml` would be corrupted by shell variable expansion.
+</Note>
+
+---
+
+## Dashboard Credentials
+
+<ParamField body="DASHBOARD_USERNAME" type="string" default="kibanaserver" required>
+  Username for the Wazuh Dashboard's internal Kibana server account. This account is used by the Dashboard's backend process to communicate with the Indexer — it is distinct from the end-user login. The default `kibanaserver` corresponds to the built-in OpenSearch Dashboards service account.
+</ParamField>
+
+<ParamField body="DASHBOARD_PASSWORD" type="string" required>
+  Password for `DASHBOARD_USERNAME`. The example value is `kibanaserver`. Change this in production.
+</ParamField>
+
+---
+
+## Agent Settings
+
+<ParamField body="LOCAL_AGENT_HOSTNAME" type="string">
+  Hostname to assign to the co-located `wazuh.agent` container. This becomes the agent's registered name in the Wazuh Dashboard. If this is set to `localhost`, `wazuh-dev.sh` automatically substitutes the actual system FQDN returned by `hostname -f`.
+</ParamField>
+
+<ParamField body="DOCKER_GID" type="string">
+  Numeric GID of the `docker` group on the host. The agent container is added to this group (via `group_add`) so it can read `/var/run/docker.sock` for Docker event monitoring without running as root. `wazuh-dev.sh` detects this automatically with `getent group docker | cut -d: -f3` and exports it before calling `docker compose`.
+</ParamField>
+
+---
+
+## Custom Admin User
+
+<ParamField body="MY_USERNAME" type="string">
+  Username of a new (or existing) OpenSearch admin user to create or update in `config/wazuh_indexer/internal_users.yml`. If the user already exists in the file, only the password hash is updated. If the user does not exist, a new entry is appended with `backend_roles: ["admin"]`.
+</ParamField>
+
+<ParamField body="MY_PASSWORD" type="string">
+  Plain-text password for `MY_USERNAME`. `wazuh-dev.sh` **never** stores this in plain text — it is immediately hashed using the Wazuh Indexer image's built-in hash tool:
+  ```bash
+  docker run --rm wazuh/wazuh-indexer:4.14.5 \
+    /usr/share/wazuh-indexer/plugins/opensearch-security/tools/hash.sh \
+    -p "$MY_PASSWORD"
+  ```
+  The resulting bcrypt hash is what gets written into `internal_users.yml`.
+</ParamField>
+
+---
+
+## Certificate Generator
+
+<ParamField body="GENERATE_INDEXER_FILE" type="string" default="generate-indexer-certs.yml">
+  Path to the Docker Compose file used by the certificate generator step. `wazuh-dev.sh` uses this value to locate the file before running `docker compose -f $GENERATE_INDEXER_FILE run --rm generator`. Change this only if you have moved or renamed the generator compose file.
+</ParamField>
+
+---
+
+## Timezone
+
+<ParamField body="TZ" type="string">
+  IANA timezone string passed to all containers via their `environment` blocks. Setting a consistent timezone ensures that log timestamps across the Indexer, Manager, and Dashboard are aligned. Example value: `America/Bogota`. Also consumed by the certificate generator container.
+</ParamField>
+
+---
+
+## Post-install Script
+
+<ParamField body="SCRIPT_POST_INSTALL" type="string">
+  Relative path (from the project root) to a shell script that the `wazuh-init` init container runs after the Dashboard becomes healthy. The init container definition is currently commented out in `docker-compose.yml`. When enabled, it uses an `alpine/curl` image to execute this script. `wazuh-dev.sh` validates that this path exists on disk before proceeding with a server deployment.
+</ParamField>
+
+---
+
+## Additional Variable
+
+<ParamField body="NGINX_IMAGE" type="string" default="nginx:1.29.3-alpine">
+  Docker image tag for an optional NGINX reverse-proxy container. This variable is present in `.env.example` for use in extended stack configurations. It is not consumed by the default `docker-compose.yml` server stack.
+</ParamField>

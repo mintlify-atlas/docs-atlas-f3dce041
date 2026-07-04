@@ -1,47 +1,164 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with the Wazuh Docker Stack"
+sidebarTitle: "Quickstart"
+description: "Deploy the full Wazuh 4.14.5 stack — Indexer, Manager, Dashboard, and Agent — on Docker Compose in under 10 minutes using the wazuh-dev.sh script."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This page walks through the complete deployment of the Wazuh Docker Stack from repository clone to first Dashboard login. The preferred deployment path uses the included `wazuh-dev.sh` helper script, which automates prerequisite validation, kernel tuning, password hashing, certificate generation, and the final `docker compose up` in a single command. By the end of this guide, all four services — Indexer, Manager, Dashboard, and Agent — will be running and the Dashboard will be accessible over HTTPS on port 6443.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+<Warning>
+  The Wazuh Indexer (OpenSearch) requires the Linux kernel parameter `vm.max_map_count` to be at least `262144`. The `wazuh-dev.sh` script sets this automatically at runtime using `sysctl -w vm.max_map_count=262144`, but **this value resets on reboot**. To persist it across restarts, add the following line to `/etc/sysctl.conf`:
 
-## Prerequisites
+  ```bash
+  echo 'vm.max_map_count=262144' >> /etc/sysctl.conf
+  ```
 
-Before you begin, you must have:
+  Then reload the configuration with `sudo sysctl -p`.
+</Warning>
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+## Deployment Steps
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Clone the Repository">
+    Clone the Wazuh Docker Stack repository and change into the project directory:
 
     ```bash
-    npm install your-package
+    git clone https://github.com/rsol9000/wazuh-docker.git
+    cd wazuh-docker
     ```
+
+    All subsequent commands in this guide assume you are running from the repository root.
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Configure Environment Variables">
+    Copy the example environment file to `.env` and edit it with your deployment-specific values:
 
     ```bash
-    your-cli init
+    cp .env.example .env
+    nano .env
     ```
+
+    The following variables must be reviewed and set before deployment:
+
+    | Variable | Default (`.env.example`) | Description |
+    |----------|--------------------------|-------------|
+    | `INDEXER_USERNAME` | `admin` | Username for the Wazuh Indexer (OpenSearch) API — used by the Manager and Dashboard to authenticate |
+    | `INDEXER_PASSWORD` | `_S1M0V1L48_T7G_2025_.*-` | Password for the Indexer API user — change this in production |
+    | `API_USERNAME` | `wazuh-wui` | Username for the Wazuh Manager REST API — consumed by the Dashboard |
+    | `API_PASSWORD` | `MyS3cr37P450r.*-` | Password for the Manager REST API user — must not contain a `$` character |
+    | `DASHBOARD_USERNAME` | `kibanaserver` | Username for the Dashboard's Indexer connection |
+    | `DASHBOARD_PASSWORD` | `kibanaserver` | Password for the Dashboard's Indexer connection — change this in production |
+    | `MANAGER_SERVER` | `10.20.203.5` | IP address or hostname of the Wazuh Manager, used by external agents for enrollment |
+    | `NETWORK` | `net_00` | Name of the Docker internal network created for inter-service communication |
+    | `SUBNET` | `10.60.60.0/24` | CIDR block for the Docker internal network |
+    | `GATEWAY` | `10.60.60.1` | Gateway address for the Docker internal network |
+    | `DOCKER_GID` | _(auto-detected)_ | Docker group ID on the host — automatically resolved by `wazuh-dev.sh` via `getent group docker`; set manually if deploying without the script |
+    | `LOCAL_AGENT_HOSTNAME` | _(host FQDN)_ | Hostname assigned to the `wazuh.agent` container; if set to `localhost`, the script substitutes the actual host FQDN using `hostname -f` |
+    | `MY_USERNAME` | _(not set)_ | Username for a custom administrative user to be created or updated in the Indexer's `internal_users.yml` |
+    | `MY_PASSWORD` | _(not set)_ | Password for the custom administrative user; the script hashes this using the Indexer's `hash.sh` tool |
+
+    The `wazuh-dev.sh` script reads `API_USERNAME`, `API_PASSWORD`, `MY_USERNAME`, and `MY_PASSWORD` directly from `.env` at runtime to patch configuration files and hash passwords before starting the stack.
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Generate TLS Certificates">
+    Generate the mutual TLS certificates required for secure communication between the Indexer, Manager, and Dashboard:
 
     ```bash
-    your-cli start
+    sudo docker compose -f generate-indexer-certs.yml run --rm generator
     ```
+
+    This command runs the `wazuh/wazuh-certs-generator:0.0.3` container, which reads the node definitions from `config/certs.yml` and outputs the following certificate files into `./config/wazuh_indexer_ssl_certs/`:
+
+    - `root-ca.pem` and `root-ca.pem` (shared CA)
+    - `root-ca-manager.pem` (CA copy for the Manager's Filebeat)
+    - `wazuh.indexer.pem` / `wazuh.indexer-key.pem`
+    - `wazuh.manager.pem` / `wazuh.manager-key.pem`
+    - `wazuh.dashboard.pem` / `wazuh.dashboard-key.pem`
+    - `admin.pem` / `admin-key.pem`
+
+    These files are bind-mounted into the respective containers at startup and are required before running `docker compose up`.
+  </Step>
+
+  <Step title="Deploy with wazuh-dev.sh">
+    Launch the full stack using the deployment helper script:
+
+    ```bash
+    sudo bash scripts/wazuh-dev.sh server up
+    ```
+
+    The script performs the following steps in order:
+
+    1. **Detects the Docker GID** — resolves the host `docker` group ID via `getent group docker` and exports it as `DOCKER_GID` so the agent container can access `/var/run/docker.sock`
+    2. **Sets `vm.max_map_count`** — checks the current value; if it is below `262144`, runs `sysctl -w vm.max_map_count=262144` automatically
+    3. **Validates dependencies** — confirms that `docker` and `curl` are available on the host PATH
+    4. **Validates required files** — checks for `.env`, `docker-compose.yml`, `config/wazuh_indexer/internal_users.yml`, and `generate-indexer-certs.yml`
+    5. **Resolves the agent hostname** — reads `LOCAL_AGENT_HOSTNAME` from `.env`; substitutes the real FQDN if the value is `localhost`
+    6. **Patches API credentials** — updates `config/wazuh_dashboard/wazuh.yml` with the `API_USERNAME` and `API_PASSWORD` values from `.env`
+    7. **Hashes the custom user password** — runs `wazuh/wazuh-indexer:4.14.5` to execute `hash.sh` against `MY_PASSWORD` and writes the bcrypt hash into `internal_users.yml`
+    8. **Generates TLS certificates** — runs `docker compose -f generate-indexer-certs.yml run --rm generator`
+    9. **Starts the stack** — executes `docker compose -f docker-compose.yml --env-file .env up -d`
+
+    The `server` argument selects `docker-compose.yml` (the full four-service stack). Use `agent` to deploy only the agent via `agent/docker-compose-agent.yml`.
+  </Step>
+
+  <Step title="Verify the Stack">
+    Confirm all containers are running and healthy:
+
+    ```bash
+    docker compose ps
+    ```
+
+    All four services — `wazuh.indexer`, `wazuh.manager`, `wazuh.dashboard`, and `wazuh.agent` — should show a status of `running`. Follow the Manager logs to watch the initial startup sequence:
+
+    ```bash
+    docker compose logs -f wazuh.manager
+    ```
+
+    Look for Filebeat successfully connecting to the Indexer and the Manager API becoming available on port 55000. The Indexer health check runs every 30 seconds with up to 3 retries; the Manager and Dashboard health checks run every 10 seconds with up to 10 retries.
+  </Step>
+
+  <Step title="Access the Dashboard">
+    Open a browser and navigate to the Dashboard on the secure HTTPS port:
+
+    ```
+    https://<your-host>:6443
+    ```
+
+    Log in with the credentials set in your `.env` file:
+
+    - **Username**: the value of `DASHBOARD_USERNAME` (default: `kibanaserver`)
+    - **Password**: the value of `DASHBOARD_PASSWORD` (default: `kibanaserver`)
+
+    On first login you will see the Wazuh security overview. Navigate to **Agents** to verify that the containerized `wazuh.agent` has enrolled and is actively sending events to the Manager. The Dashboard communicates with the Manager API at `https://wazuh.manager:55000` using the `API_USERNAME` and `API_PASSWORD` credentials.
   </Step>
 </Steps>
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+  For a quick manual deployment without the `wazuh-dev.sh` script — for example, if you have already generated certificates and patched the configuration files in a previous run — you can start the stack directly with:
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+  ```bash
+  sudo docker compose up -d
+  ```
+
+  Ensure `.env` is populated, certificates exist in `./config/wazuh_indexer_ssl_certs/`, and `vm.max_map_count` is already set to `262144` before using this shortcut.
 </Tip>
+
+## Quick Health Check
+
+Once the stack is up, use the following commands to verify each service is responding:
+
+```bash
+# Check container status and health state for all four services
+docker compose ps
+
+# Stream Manager logs to watch for startup errors or Filebeat connection issues
+docker compose logs -f wazuh.manager
+
+# Query the Indexer REST API — should return cluster health JSON (HTTP 200)
+curl -k -u admin:SecretPassword https://localhost:9200
+
+# Query the Manager REST API — should return a JSON response with version info
+curl -sk https://localhost:55000
+```
+
+Replace `SecretPassword` with the value of `INDEXER_PASSWORD` from your `.env` file. The `-k` flag bypasses TLS certificate validation for the self-signed certificates generated in Step 3.

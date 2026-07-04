@@ -1,0 +1,193 @@
+---
+title: "Wazuh Stack Architecture and Component Data Flow"
+sidebarTitle: "Architecture"
+description: "Explore the Wazuh Docker Stack's four-component architecture, inter-service communication, network topology, certificate layout, and Docker volume structure."
+---
+
+The Wazuh Docker Stack is a single-node deployment in which all four services — Indexer, Manager, Dashboard, and Agent — run as individual containers on a shared Docker internal network. There is no external load balancer, no Kubernetes orchestration, and no multi-node clustering: every component resolves its peers by Docker hostname (e.g., `wazuh.manager`, `wazuh.indexer`, `wazuh.dashboard`). All inter-service communication is secured with mutual TLS certificates generated at deployment time by the `wazuh/wazuh-certs-generator:0.0.3` image. The Manager forwards processed alerts to the Indexer using an embedded Filebeat instance with full certificate verification. This architecture delivers a complete, self-contained security monitoring environment that is reproducible across environments and upgradeable by replacing image tags in `docker-compose.yml`.
+
+<Info>
+  The Wazuh cluster is configured as a **single-node master**. In `wazuh_manager.conf`, the cluster mode is set to `node_type: master` with `<disabled>yes</disabled>` for the cluster stanza. This means no inter-manager clustering is active — the Manager operates in standalone mode, which is the correct configuration for single-host deployments.
+</Info>
+
+## Components and Responsibilities
+
+**Wazuh Indexer** — `wazuh/wazuh-indexer:4.14.5`
+
+The Indexer is the OpenSearch-based data persistence and search layer. It stores all normalized security alerts received from the Manager, maintains index mappings for Wazuh alert schemas, and responds to Dashboard queries over the OpenSearch REST API. The JVM is configured with 1 GB heap (`-Xms1g -Xmx1g`). TLS is enforced on all connections: the `root-ca.pem`, `wazuh.indexer.pem`, `wazuh.indexer-key.pem`, `admin.pem`, and `admin-key.pem` certificate files are bind-mounted from `./config/wazuh_indexer_ssl_certs/` into `/usr/share/wazuh-indexer/config/certs/`. Internal security (OpenSearch Security plugin) uses `internal_users.yml` for user authentication.
+
+| Detail | Value |
+|--------|-------|
+| Docker image | `wazuh/wazuh-indexer:4.14.5` |
+| Container name / hostname | `wazuh.indexer` |
+| Exposed host port | `9200` → container `9200` |
+| Protocol | HTTPS (TLS) |
+
+**Wazuh Manager** — `wazuh/wazuh-manager:4.14.5`
+
+The Manager is the analysis and event processing engine. It listens for agent connections on port 1514 and handles new agent enrollment on port 1515. Incoming events are decoded and evaluated against the ruleset defined in `ossec.conf`. Matched alerts are passed to the embedded Filebeat process, which ships them to `https://wazuh.indexer:9200` using the `wazuh.manager.pem` certificate and `root-ca-manager.pem` CA. The Manager's REST API (`wazuh-api`) is available on port 55000 and is used by the Dashboard and by `wazuh-dev.sh` for credential configuration.
+
+| Detail | Value |
+|--------|-------|
+| Docker image | `wazuh/wazuh-manager:4.14.5` |
+| Container name / hostname | `wazuh.manager` |
+| Exposed host ports | `1514/tcp` (events), `1515/tcp` (enrollment), `514/udp` (syslog), `55000/tcp` (REST API) |
+| Filebeat TLS mode | `FILEBEAT_SSL_VERIFICATION_MODE=full` |
+
+**Wazuh Dashboard** — `wazuh/wazuh-dashboard:4.14.5`
+
+The Dashboard is the OpenSearch Dashboards-based web interface for the Wazuh security platform. It connects to the Indexer using `INDEXER_USERNAME` / `INDEXER_PASSWORD` and to the Manager REST API using `API_USERNAME` / `API_PASSWORD`. Its configuration is provided via bind-mounted `opensearch_dashboards.yml` and `wazuh.yml` files. The container's internal HTTPS server runs on port 5601 and is exposed to the host on port 6443. Three certificate files — `wazuh.dashboard.pem`, `wazuh.dashboard-key.pem`, and `root-ca.pem` — are mounted into `/usr/share/wazuh-dashboard/certs/`.
+
+| Detail | Value |
+|--------|-------|
+| Docker image | `wazuh/wazuh-dashboard:4.14.5` |
+| Container name / hostname | `wazuh.dashboard` |
+| Exposed host port | `6443` → container `5601` |
+| Manager API endpoint | `https://wazuh.manager` (port 55000) |
+
+**Wazuh Agent** — `wazuh/wazuh-agent:4.14.5`
+
+The Agent container runs in privileged mode on the Docker host to enable full visibility into host system activity. It connects to the Manager using the Docker-internal hostname `wazuh.manager` on port 1514. The container mounts `/var/log` (host system logs) and `/var/run/docker.sock` (read-only, for Docker container monitoring). The agent's hostname is set by `LOCAL_AGENT_HOSTNAME` from `.env`, allowing it to appear under a meaningful name in the Dashboard's agent list. Resource limits are enforced: 2 CPUs maximum, 1 GB memory maximum (512 MB reserved).
+
+| Detail | Value |
+|--------|-------|
+| Docker image | `wazuh/wazuh-agent:4.14.5` |
+| Container name | `wazuh.agent` |
+| Manager connection | `wazuh.manager:1514` |
+| Privileged mode | Yes — required for host log access |
+
+## Network Topology
+
+All four containers communicate over a single Docker bridge network. The network name, subnet, and gateway are configurable via `.env` variables, with the following defaults from `.env.example`:
+
+| Variable | Default Value | Purpose |
+|----------|---------------|---------|
+| `NETWORK` | `net_00` | Name of the Docker network created by Compose |
+| `SUBNET` | `10.60.60.0/24` | CIDR address range for container IPs |
+| `GATEWAY` | `10.60.60.1` | Default gateway for the network |
+
+Within this network, containers resolve each other by hostname using Docker's embedded DNS resolver. Service-to-service references throughout the configuration files use these hostnames exclusively:
+
+- `wazuh.manager` — used by the Agent (`WAZUH_MANAGER_SERVER`), the Dashboard (`WAZUH_API_URL`), and the Indexer environment reference for Filebeat
+- `wazuh.indexer` — used by the Manager (`INDEXER_URL=https://wazuh.indexer:9200`) and the Dashboard for index queries
+- `wazuh.dashboard` — registered as a certificate subject in `certs.yml` and used for TLS validation on the Dashboard container
+
+No external network routing is required for inter-service communication. Only the explicitly declared host port mappings (1514, 1515, 514/udp, 55000, 9200, 6443) are accessible from outside the Docker network.
+
+## TLS Certificate Layout
+
+Certificates are generated by the `wazuh/wazuh-certs-generator:0.0.3` image, which reads node definitions from `config/certs.yml`:
+
+```yaml
+nodes:
+  indexer:
+    - name: wazuh.indexer
+      ip: wazuh.indexer
+  server:
+    - name: wazuh.manager
+      ip: wazuh.manager
+  dashboard:
+    - name: wazuh.dashboard
+      ip: wazuh.dashboard
+```
+
+The generator writes the following certificate files into `./config/wazuh_indexer_ssl_certs/`:
+
+| File | Used By | Purpose |
+|------|---------|---------|
+| `root-ca.pem` | Indexer, Dashboard | Root Certificate Authority — shared trust anchor for Indexer and Dashboard |
+| `root-ca-manager.pem` | Manager (Filebeat) | Copy of the Root CA mounted as the Filebeat CA bundle |
+| `wazuh.indexer.pem` | Indexer | Indexer node TLS certificate (public) |
+| `wazuh.indexer-key.pem` | Indexer | Indexer node TLS private key |
+| `wazuh.manager.pem` | Manager (Filebeat) | Filebeat client certificate for Indexer communication (public) |
+| `wazuh.manager-key.pem` | Manager (Filebeat) | Filebeat client private key |
+| `wazuh.dashboard.pem` | Dashboard | Dashboard server TLS certificate (public) |
+| `wazuh.dashboard-key.pem` | Dashboard | Dashboard server TLS private key |
+| `admin.pem` | Indexer | Admin client certificate for OpenSearch Security plugin operations |
+| `admin-key.pem` | Indexer | Admin client private key |
+
+The `generate-indexer-certs.yml` Compose file mounts `./config/wazuh_indexer_ssl_certs/` as a bind volume at `/certificates/` inside the generator container. Certificate generation is idempotent — re-running the command overwrites existing files with freshly issued certificates.
+
+## Data Flow
+
+The following describes how security event data moves through the stack from collection to visualization:
+
+1. **Agent → Manager (port 1514 TCP)**: The `wazuh.agent` container collects events from the host's `/var/log` directory and Docker socket, then forwards them over TCP to `wazuh.manager:1514` using the Wazuh agent protocol.
+
+2. **Manager processing**: The Manager decodes raw events using its decoder library, evaluates them against detection rules, enriches matching events with metadata, and optionally triggers active response actions.
+
+3. **Manager → Indexer via Filebeat (port 9200 HTTPS)**: Processed alerts are passed to the embedded Filebeat instance, which ships them to `https://wazuh.indexer:9200` using `SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem`, `SSL_CERTIFICATE=/etc/ssl/filebeat.pem` (i.e., `wazuh.manager.pem`), and `SSL_KEY=/etc/ssl/filebeat.key` (i.e., `wazuh.manager-key.pem`). Full TLS verification is enforced (`FILEBEAT_SSL_VERIFICATION_MODE=full`).
+
+4. **Dashboard → Indexer (port 9200 HTTPS)**: When a user opens the Dashboard, it queries the Indexer directly for alert data, agent statistics, and index patterns using the `INDEXER_USERNAME` / `INDEXER_PASSWORD` credentials.
+
+5. **Dashboard → Manager API (port 55000 HTTPS)**: The Dashboard's Wazuh plugin connects to `https://wazuh.manager:55000` using `API_USERNAME` / `API_PASSWORD` (configured in `config/wazuh_dashboard/wazuh.yml` by `wazuh-dev.sh`) to manage agents, groups, and configuration.
+
+6. **External agents → Manager (ports 1514 and 1515)**: Remote agents installed on external hosts connect to the Manager's published IP (`MANAGER_SERVER` in `.env`) on port 1515 for initial enrollment and port 1514 for ongoing event forwarding.
+
+## Volume Architecture
+
+All named volumes in the stack use Docker's default local driver and persist automatically across container restarts and upgrades:
+
+| Volume Name | Mounted In | Internal Container Path | Purpose |
+|-------------|-----------|------------------------|---------|
+| `wazuh_api_configuration` | `wazuh.manager` | `/var/ossec/api/configuration` | Manager REST API keys, configuration, and SSL settings |
+| `wazuh_etc` | `wazuh.manager` | `/var/ossec/etc` | Core Manager configuration: `ossec.conf`, decoders, rules, agent groups |
+| `wazuh_logs` | `wazuh.manager` | `/var/ossec/logs` | Manager operational logs and compressed alert archives |
+| `wazuh_queue` | `wazuh.manager` | `/var/ossec/queue` | Internal event queues (syscheck DB, agent info, active response) |
+| `wazuh_var_multigroups` | `wazuh.manager` | `/var/ossec/var/multigroups` | Merged configuration files for agents belonging to multiple groups |
+| `wazuh_integrations` | `wazuh.manager` | `/var/ossec/integrations` | Custom integration scripts (Slack, PagerDuty, VirusTotal, etc.) |
+| `wazuh_active_response` | `wazuh.manager` | `/var/ossec/active-response/bin` | Active response executables triggered automatically on rule matches |
+| `wazuh_agentless` | `wazuh.manager` | `/var/ossec/agentless` | Scripts and state for agentless SSH-based monitoring |
+| `wazuh_wodles` | `wazuh.manager` | `/var/ossec/wodles` | Wazuh OpenSCAP, CIS-CAT, and other modular audit components |
+| `filebeat_etc` | `wazuh.manager` | `/etc/filebeat` | Filebeat YAML configuration and pipeline definitions |
+| `filebeat_var` | `wazuh.manager` | `/var/lib/filebeat` | Filebeat registry and state (ensures no duplicate event shipping) |
+| `wazuh-indexer-data` | `wazuh.indexer` | `/var/lib/wazuh-indexer` | OpenSearch data directory — all indexed alert documents and metadata |
+| `wazuh-dashboard-config` | `wazuh.dashboard` | `/usr/share/wazuh-dashboard/data/wazuh/config` | Persistent Dashboard settings, saved API hosts, and plugin configuration |
+| `wazuh-dashboard-custom` | `wazuh.dashboard` | `/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom` | Custom branding assets such as logos and CSS overrides |
+
+## Health Checks
+
+Each service in `docker-compose.yml` declares a Docker health check that Docker Engine uses to determine container readiness:
+
+**Wazuh Indexer**
+
+```bash
+curl -k -u ${INDEXER_USERNAME}:${INDEXER_PASSWORD} https://localhost:9200 >/dev/null 2>&1
+```
+
+| Parameter | Value |
+|-----------|-------|
+| Interval | 30 seconds |
+| Timeout | 10 seconds |
+| Retries | 3 |
+| Start period | 30 seconds |
+
+The Indexer is given a 30-second grace period before health checks begin, accommodating its slower OpenSearch startup sequence.
+
+**Wazuh Manager**
+
+```bash
+curl -sk https://localhost:55000 > /dev/null || exit 1
+```
+
+| Parameter | Value |
+|-----------|-------|
+| Interval | 10 seconds |
+| Timeout | 10 seconds |
+| Retries | 10 |
+
+The Manager health check probes the REST API endpoint. With 10 retries at 10-second intervals, the container has up to 100 seconds to become healthy before Docker marks it as `unhealthy`.
+
+**Wazuh Dashboard**
+
+```bash
+curl -sk https://localhost:5601/api/status >/dev/null || exit 1
+```
+
+| Parameter | Value |
+|-----------|-------|
+| Interval | 10 seconds |
+| Timeout | 10 seconds |
+| Retries | 10 |
+
+The Dashboard health check polls the OpenSearch Dashboards status API endpoint. This endpoint returns HTTP 200 once the Dashboard has fully initialized and connected to the Indexer.

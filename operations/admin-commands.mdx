@@ -1,0 +1,264 @@
+---
+title: "Wazuh Docker Stack Administration Commands"
+sidebarTitle: "Admin Commands"
+description: "Reference of Docker Compose and wazuh-dev.sh commands for managing the Wazuh stack lifecycle, inspecting logs, and querying the Manager and Indexer APIs."
+---
+
+This page covers day-to-day operational commands for the Wazuh Docker Stack — starting, stopping, inspecting, and querying each service. Commands are organized by function: the `wazuh-dev.sh` helper script for opinionated deployments, raw Docker Compose lifecycle management, log inspection, REST API queries against both the Manager and the Indexer, interactive shell access into containers, and volume backup/restore procedures.
+
+## wazuh-dev.sh Usage
+
+The `scripts/wazuh-dev.sh` helper script wraps Docker Compose with pre-flight validation, automatic `vm.max_map_count` tuning, credential hashing, and cert generation. It is the recommended entry point for deploying and managing the stack in the Simovilab environment.
+
+**Interface:**
+
+```bash
+sudo bash scripts/wazuh-dev.sh [server|agent] [action]
+```
+
+| Argument | Values | Description |
+|---|---|---|
+| `server` | — | Operates on `docker-compose.yml` (full Wazuh stack) |
+| `agent` | — | Operates on `agent/docker-compose-agent.yml` (agent only) |
+| `action` | `up` (default), `down`, `logs`, `ps`, `restart` | Compose lifecycle action to perform |
+
+**Examples:**
+
+```bash
+# Deploy the full Wazuh server stack
+sudo bash scripts/wazuh-dev.sh server up
+
+# Tear down the full server stack
+sudo bash scripts/wazuh-dev.sh server down
+
+# Follow all server stack logs
+sudo bash scripts/wazuh-dev.sh server logs
+
+# Deploy the local Wazuh agent only
+sudo bash scripts/wazuh-dev.sh agent up
+```
+
+### What `server up` does
+
+When you run `sudo bash scripts/wazuh-dev.sh server up`, the script performs the following steps in order:
+
+1. **Dependency check** — verifies `docker` and `curl` are installed and on `PATH`.
+2. **`.env` validation** — checks that a `.env` file exists; if not, copies `.env.example` as a starting point and exits with a warning.
+3. **Compose file check** — confirms `docker-compose.yml` is present in the repo root.
+4. **`internal_users.yml` check** — confirms `config/wazuh_indexer/internal_users.yml` exists.
+5. **Cert file check** — confirms `generate-indexer-certs.yml` is present.
+6. **Post-install script check** — validates that `SCRIPT_POST_INSTALL` from `.env` points to an existing file.
+7. **Docker GID detection** — runs `getent group docker | cut -d: -f3` to find the host Docker group ID and exports it as `DOCKER_GID` so the agent container can access `/var/run/docker.sock`.
+8. **`vm.max_map_count` enforcement** — reads `/proc/sys/vm/max_map_count`; if the value is below `262144`, runs `sysctl -w vm.max_map_count=262144` to satisfy OpenSearch requirements.
+9. **Agent hostname resolution** — reads `LOCAL_AGENT_HOSTNAME` from `.env`; if the value is `localhost`, replaces it with the actual FQDN from `hostname -f`.
+10. **`$` character validation** — exits with an error if `API_PASSWORD` or `API_USERNAME` in `.env` contain the `$` character (unsupported by the sed-based substitution).
+11. **`wazuh.yml` credential sync** — updates `config/wazuh_dashboard/wazuh.yml` with the `API_USERNAME` and `API_PASSWORD` values from `.env` using `sed` in-place substitution.
+12. **Password hashing** — reads `MY_USERNAME` and `MY_PASSWORD` from `.env`, runs the Indexer's `hash.sh` tool via `docker run` to produce a bcrypt hash, and upserts the user into `config/wazuh_indexer/internal_users.yml`.
+13. **Certificate generation** — runs `docker compose -f generate-indexer-certs.yml run --rm generator` to produce fresh TLS certs in `./config/wazuh_indexer_ssl_certs/`.
+14. **Stack start** — runs `docker compose -f docker-compose.yml --env-file .env up -d`.
+
+<Tip>
+  Run `sudo bash scripts/wazuh-dev.sh server up` any time you change credentials in `.env` — it re-hashes passwords and re-syncs `wazuh.yml` before restarting the stack, ensuring all services stay in sync.
+</Tip>
+
+---
+
+## Stack Lifecycle (Docker Compose)
+
+Use these commands when you want direct control over the stack without the pre-flight validation that `wazuh-dev.sh` performs. Ensure `.env` is sourced and `vm.max_map_count` is already set before using these commands cold.
+
+```bash
+# Start all services in the background
+sudo docker compose up -d
+
+# Stop and remove containers (named volumes are preserved)
+sudo docker compose down
+
+# Restart a specific service without recreating other containers
+sudo docker compose restart wazuh.manager
+
+# Force recreate all containers (picks up image or config changes)
+sudo docker compose up -d --force-recreate
+
+# Check running containers and health status
+sudo docker compose ps
+```
+
+<Tip>
+  To update the stack to a new Wazuh version, change the image tags in `docker-compose.yml` (e.g., `wazuh/wazuh-manager:4.14.5` → the new version), stop the stack with `sudo docker compose down`, pull the new images with `sudo docker compose pull`, and then restart with `sudo docker compose up -d`.
+</Tip>
+
+---
+
+## Log Inspection
+
+All containers write structured output to Docker's log driver. Use `docker compose logs` to stream or retrieve them.
+
+```bash
+# Follow all service logs in real time (Ctrl+C to stop)
+sudo docker compose logs -f
+
+# Follow logs for a specific service
+sudo docker compose logs -f wazuh.manager
+sudo docker compose logs -f wazuh.indexer
+sudo docker compose logs -f wazuh.dashboard
+sudo docker compose logs -f wazuh.agent
+
+# Show last 100 lines from the Manager without following
+sudo docker compose logs --tail=100 wazuh.manager
+```
+
+---
+
+## Wazuh REST API
+
+The Wazuh Manager exposes a REST API on port `55000`. Authentication is a two-step process: first POST to `/security/user/authenticate` with HTTP Basic credentials to receive a short-lived JWT token, then supply that token as a `Bearer` header on subsequent requests.
+
+The default API credentials defined in `.env.example` are:
+
+| Variable | Example Value |
+|---|---|
+| `API_USERNAME` | `wazuh-wui` |
+| `API_PASSWORD` | `MyS3cr37P450r.*-` |
+
+Replace these with the values you have set in your `.env` before running the commands below.
+
+```bash
+# Authenticate and capture the JWT token
+TOKEN=$(curl -k -s -u "wazuh-wui:MyS3cr37P450r.*-" \
+  -X POST "https://localhost:55000/security/user/authenticate?raw=true")
+
+# List all registered agents
+curl -k -s -H "Authorization: Bearer $TOKEN" \
+  https://localhost:55000/agents | python3 -m json.tool
+
+# Get Manager service status
+curl -k -s -H "Authorization: Bearer $TOKEN" \
+  https://localhost:55000/manager/status | python3 -m json.tool
+
+# Get Manager version and build info
+curl -k -s -H "Authorization: Bearer $TOKEN" \
+  https://localhost:55000/manager/info | python3 -m json.tool
+```
+
+### Waiting for the API to become available
+
+The `wazuh-conf-en.sh` post-install script uses a retry loop — a pattern you can reuse in your own automation — that polls the API endpoint and waits until it returns HTTP `200` or `401` before proceeding:
+
+```bash
+COUNT=0
+MAX_RETRIES=5
+
+echo "Waiting for Wazuh API to be available..."
+
+until curl -k -s -o /dev/null \
+  -w "%{http_code}" \
+  -X POST "https://localhost:55000/security/user/authenticate?raw=true" \
+  | grep -qE '200|401'; do
+
+  COUNT=$((COUNT + 1))
+
+  if [ "$COUNT" -ge "$MAX_RETRIES" ]; then
+    echo "Wazuh API not available after $MAX_RETRIES attempts, exiting."
+    exit 1
+  fi
+
+  echo "Attempt $COUNT/$MAX_RETRIES — retrying in 5 seconds..."
+  sleep 5
+done
+
+echo "Wazuh API available."
+```
+
+A `200` response means authentication succeeded; a `401` means the API is up but credentials were rejected — both indicate the API process is healthy and accepting connections.
+
+---
+
+## Wazuh Indexer API
+
+The Wazuh Indexer (OpenSearch) exposes its HTTP API on port `9200`. Authentication uses the `admin` user configured in `config/wazuh_indexer/internal_users.yml`. Replace `SecretPassword` with your actual `INDEXER_PASSWORD` value from `.env`.
+
+```bash
+# Check overall cluster health (green/yellow/red)
+curl -k -u admin:SecretPassword \
+  https://localhost:9200/_cluster/health?pretty
+
+# List all Wazuh indices with document counts and sizes
+curl -k -u admin:SecretPassword \
+  https://localhost:9200/_cat/indices/wazuh*?v
+
+# Check node information
+curl -k -u admin:SecretPassword \
+  https://localhost:9200/_nodes?pretty
+
+# Check index templates (useful for schema debugging)
+curl -k -u admin:SecretPassword \
+  https://localhost:9200/_cat/templates/wazuh*?v
+```
+
+<Note>
+  Port `9200` is mapped directly to the host in `docker-compose.yml`. In production, consider blocking this port from external access with a firewall rule — see [Security](/operations/security) for details.
+</Note>
+
+---
+
+## Container Exec (Shell Access)
+
+Use `docker exec` to run commands inside a running container or open an interactive shell for in-depth debugging.
+
+```bash
+# Open an interactive bash shell inside the Manager container
+docker exec -it wazuh.manager bash
+
+# Check all Wazuh daemon statuses from inside the Manager
+docker exec wazuh.manager /var/ossec/bin/wazuh-control status
+
+# Open an interactive bash shell inside the Indexer
+docker exec -it wazuh.indexer bash
+
+# Open an interactive bash shell inside the Dashboard
+docker exec -it wazuh.dashboard bash
+
+# Run a one-off command inside the Indexer (e.g., check Java version)
+docker exec wazuh.indexer java -version
+```
+
+---
+
+## Data Backup and Restore
+
+All persistent data lives in named Docker volumes defined in `docker-compose.yml`. Back up volumes by mounting them alongside a scratch Alpine container.
+
+```bash
+# Backup Manager configuration volume (wazuh_etc) to a local tar.gz
+docker run --rm \
+  -v wazuh_etc:/data \
+  -v $(pwd):/backup \
+  alpine \
+  tar czf /backup/wazuh_etc_backup.tar.gz -C /data .
+
+# Backup Manager logs volume
+docker run --rm \
+  -v wazuh_logs:/data \
+  -v $(pwd):/backup \
+  alpine \
+  tar czf /backup/wazuh_logs_backup.tar.gz -C /data .
+
+# Backup Indexer data volume
+docker run --rm \
+  -v wazuh-indexer-data:/data \
+  -v $(pwd):/backup \
+  alpine \
+  tar czf /backup/wazuh_indexer_backup.tar.gz -C /data .
+
+# Restore Manager configuration volume from backup
+docker run --rm \
+  -v wazuh_etc:/data \
+  -v $(pwd):/backup \
+  alpine \
+  tar xzf /backup/wazuh_etc_backup.tar.gz -C /data
+```
+
+<Note>
+  Stop the relevant containers before restoring volumes to avoid data corruption: `sudo docker compose stop wazuh.manager` before restoring `wazuh_etc`, for example.
+</Note>

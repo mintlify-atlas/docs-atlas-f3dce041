@@ -1,0 +1,75 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "Wazuh Docker Stack",
+  "projectDescription": "A production-ready Docker Compose deployment of Wazuh 4.14 for the Simovilab environment, including Indexer, Manager, Dashboard, and Agent components with automated certificate generation and configuration scripts.",
+  "theme": "aspen",
+  "primaryColor": "#005F73",
+  "lightColor": "#0A9396",
+  "darkColor": "#001219",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/server-stack",
+              "deployment/certificates",
+              "deployment/environment-variables",
+              "deployment/agent"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/manager",
+              "configuration/indexer",
+              "configuration/dashboard",
+              "configuration/agent-ossec"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/admin-commands",
+              "operations/security",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Full Wazuh 4.14.5 stack deployed via Docker Compose (Indexer, Manager, Dashboard, Agent)",
+    "Automated TLS certificate generation using wazuh-certs-generator",
+    "Docker monitoring via docker-listener wodle",
+    "File integrity monitoring (FIM) with real-time directory watching",
+    "Security Configuration Assessment (SCA) with CIS Ubuntu 22.04 policy",
+    "Vulnerability detection with 60-minute feed update interval",
+    "Active response commands (firewall-drop, host-deny, disable-account)",
+    "Wazuh REST API exposed on port 55000 with configurable credentials",
+    "Development helper script (wazuh-dev.sh) for server and agent lifecycle management",
+    "Persistent named Docker volumes for all stateful components"
+  ],
+  "publicApiSurface": [
+    "POST /security/user/authenticate — Wazuh REST API authentication (port 55000)",
+    "GET https://wazuh.indexer:9200 — Wazuh Indexer API (port 9200)",
+    "TCP 1514 — Agent-to-Manager secure communication",
+    "TCP 1515 — Agent registration and authentication (wazuh-authd)",
+    "UDP 514 — Syslog ingestion",
+    "HTTPS 6443 — Wazuh Dashboard web interface",
+    "scripts/wazuh-dev.sh server [up|down|logs|ps|restart]",
+    "scripts/wazuh-dev.sh agent [up|down|logs|ps|restart]",
+    "docker compose -f generate-indexer-certs.yml run --rm generator"
+  ]
+}

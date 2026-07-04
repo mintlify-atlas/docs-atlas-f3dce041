@@ -1,20 +1,77 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Wazuh Docker Stack: Production Security Monitoring"
+sidebarTitle: "Home"
+description: "Deploy a full Wazuh 4.14.5 security monitoring stack on Docker Compose — Indexer, Manager, Dashboard, and Agent, with automated TLS and configuration scripts."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+The Wazuh Docker Stack is a production-ready Docker Compose deployment of **Wazuh 4.14.5** for the Simovilab environment. It bundles all four Wazuh components — Indexer, Manager, Dashboard, and Agent — with automated TLS certificate generation, pre-configured security policies, and a development helper script to manage the full lifecycle.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Deploy the full Wazuh stack in minutes with a step-by-step guide.
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/architecture">
+    Understand the components, ports, and data flow of the stack.
+  </Card>
+  <Card title="Server Deployment" icon="server" href="/deployment/server-stack">
+    Deploy the Wazuh Indexer, Manager, and Dashboard services.
+  </Card>
+  <Card title="Agent Deployment" icon="circle-nodes" href="/deployment/agent">
+    Connect a Wazuh agent — containerized or native — to the Manager.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## What's Included
+
+The stack is composed of four services, all running on **Wazuh 4.14.5** images:
+
+| Component | Image | Role |
+|---|---|---|
+| **Wazuh Indexer** | `wazuh/wazuh-indexer:4.14.5` | OpenSearch-based data store for alerts and events |
+| **Wazuh Manager** | `wazuh/wazuh-manager:4.14.5` | Core analysis engine, ruleset engine, and REST API |
+| **Wazuh Dashboard** | `wazuh/wazuh-dashboard:4.14.5` | Web UI served over HTTPS on port 6443 |
+| **Wazuh Agent** | `wazuh/wazuh-agent:4.14.5` | Host monitoring agent with Docker listener enabled |
+
+## Key Capabilities
+
+<CardGroup cols={2}>
+  <Card title="TLS Everywhere" icon="lock">
+    Auto-generated self-signed certificates for all inter-service communication using `wazuh-certs-generator`.
+  </Card>
+  <Card title="Docker Monitoring" icon="docker">
+    Built-in `docker-listener` wodle captures container lifecycle events from the host socket.
+  </Card>
+  <Card title="File Integrity Monitoring" icon="shield-check">
+    Real-time FIM on critical directories (`/etc`, `/bin`, `/sbin`) with change alerts.
+  </Card>
+  <Card title="Vulnerability Detection" icon="bug">
+    Automated vulnerability feed updates every 60 minutes with indexed results.
+  </Card>
+  <Card title="Security Configuration Assessment" icon="clipboard-check">
+    CIS Ubuntu 22.04 benchmark scanning via SCA with configurable policy interval.
+  </Card>
+  <Card title="Active Response" icon="bolt">
+    Automated responses including `firewall-drop`, `host-deny`, and `disable-account`.
+  </Card>
+</CardGroup>
+
+## Get Started
+
+<Steps>
+  <Step title="Clone the repository and configure your environment">
+    Copy `.env.example` to `.env` and set your credentials and network settings.
+  </Step>
+  <Step title="Generate TLS certificates">
+    Run the certificate generator compose file to produce all required PEM files.
+  </Step>
+  <Step title="Deploy the stack">
+    Use `docker compose up -d` or the `wazuh-dev.sh` script to bring up all services.
+  </Step>
+  <Step title="Access the Dashboard">
+    Open `https://<your-host>:6443` in your browser and log in with your configured credentials.
+  </Step>
+</Steps>
+
+<Note>
+  The `scripts/wazuh-dev.sh` helper script validates prerequisites, sets `vm.max_map_count`, hashes passwords, generates certificates, and starts the stack — all in one command. See the [Quickstart](/quickstart) for the full walkthrough.
+</Note>

@@ -1,0 +1,263 @@
+---
+title: "Deploy a Wazuh Agent to Monitor Remote Hosts"
+sidebarTitle: "Agent"
+description: "Connect a Wazuh 4.14.1 agent to the Manager — run it as a Docker container on a remote host or install it natively on Linux with Docker monitoring enabled."
+---
+
+The Wazuh agent collects system events, file-integrity changes, log entries, and Docker container events from a monitored host and forwards them to the Wazuh Manager over TCP port 1514. Enrollment (registration) happens automatically over TCP port 1515 using the Manager's `authd` service. Two deployment styles are supported: a containerised agent run via Docker Compose on any host with Docker installed, and a native `dpkg`-installed agent for Linux hosts where you prefer a system service.
+
+<Tip>
+  Use `wazuh-dev.sh` in `agent` mode for remote deployments — it auto-detects the host's `DOCKER_GID`, validates all required files, resolves the agent hostname, and handles the full `docker compose up` lifecycle in one command.
+</Tip>
+
+---
+
+## Deployment Methods
+
+<Tabs>
+  <Tab title="Docker Container Agent (Remote)">
+
+    ### Prerequisites
+
+    - Docker Engine installed on the **monitored host** (not necessarily the same host as the Manager)
+    - The project repository cloned on the monitored host, or at minimum the `agent/` directory and `.env` file transferred to it
+    - TCP ports **1514** and **1515** must be reachable from the monitored host to the Manager host
+    - The host Docker group GID (`DOCKER_GID`) — needed so the container can read `/var/run/docker.sock`
+
+    ### docker-compose-agent.yml
+
+    The agent-only Compose file at `agent/docker-compose-agent.yml` is:
+
+    ```yaml
+    services:
+      wazuh.agent:
+        image: wazuh/wazuh-agent:4.14.1
+        restart: always
+        container_name: wazuh.agent
+        privileged: true
+        deploy:
+          resources:
+            limits:
+              memory: 1G
+              cpus: "2.0"
+            reservations:
+              memory: 512M
+              cpus: "1.0"
+        #user: "1001:990"
+        group_add:
+          - "${DOCKER_GID}"
+        environment:
+          - WAZUH_MANAGER_SERVER=${AGENT_MANAGER_SERVER}
+          - WAZUH_AGENT_NAME=localhost
+          - WAZUH_MANAGER_SERVER_PORT=1514
+        volumes:
+          - ./agent/conf/remote_ossec.conf:/var/ossec/etc/ossec.conf
+          - /var/run/docker.sock:/var/run/docker.sock:ro
+          - /etc/os-release:/etc/os-release:ro
+          - /var/log:/var/log
+          - TZ=${TZ}
+          - /sys:/sys:ro
+    ```
+
+    ### Required Environment Variables
+
+    Before deploying, ensure the following variables are set in your `.env` file (or exported in the shell):
+
+    | Variable | Description |
+    |----------|-------------|
+    | `AGENT_MANAGER_SERVER` | IP address or FQDN of the Wazuh Manager host. The agent enrolls and ships events to this address on ports 1515 and 1514. |
+    | `DOCKER_GID` | Numeric GID of the `docker` group on the **monitored host**. The agent container uses `group_add` to join this group and gain read access to `/var/run/docker.sock`. |
+    | `TZ` | IANA timezone string (e.g. `America/Bogota`) for container timestamps. |
+
+    ### Deploy with wazuh-dev.sh
+
+    From the project root on the monitored host, run:
+
+    ```bash
+    sudo bash scripts/wazuh-dev.sh agent up
+    ```
+
+    The script auto-detects `DOCKER_GID` with `getent group docker | cut -d: -f3`, validates the `.env` and `agent/docker-compose-agent.yml` files, then executes `docker compose -f agent/docker-compose-agent.yml --env-file .env up -d`.
+
+    ### Deploy Manually
+
+    If you prefer to deploy without the helper script:
+
+    ```bash
+    AGENT_MANAGER_SERVER=<manager-ip> \
+    DOCKER_GID=$(getent group docker | cut -d: -f3) \
+    docker compose -f agent/docker-compose-agent.yml up -d
+    ```
+
+    Replace `<manager-ip>` with the IP address or FQDN of your Wazuh Manager.
+
+    ### Volume Mounts Explained
+
+    | Host Path | Container Path | Purpose |
+    |-----------|----------------|---------|
+    | `./agent/conf/remote_ossec.conf` | `/var/ossec/etc/ossec.conf` | Agent configuration — uses `${HOSTNAME}` for dynamic agent name enrollment |
+    | `/var/run/docker.sock` | `/var/run/docker.sock` (`:ro`) | Read-only Docker socket access for the `docker-listener` wodle |
+    | `/etc/os-release` | `/etc/os-release` (`:ro`) | Host OS identification |
+    | `/var/log` | `/var/log` | Host log directory monitored by the agent's `localfile` rules |
+    | `/sys` | `/sys` (`:ro`) | System information access for hardware inventory |
+
+    <Note>
+      The agent runs with `privileged: true` and the host Docker GID to allow the `docker-listener` wodle to access `/var/run/docker.sock`. This is required for Docker container event monitoring.
+    </Note>
+
+  </Tab>
+  <Tab title="Native Linux Agent">
+
+    ### Install the Agent Package
+
+    Download and install the Wazuh agent `.deb` package, substituting your Manager's IP address and a descriptive agent name:
+
+    ```bash
+    wget https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.14.1-1_amd64.deb \
+      && sudo WAZUH_MANAGER='<manager-ip>' \
+              WAZUH_AGENT_GROUP='default' \
+              WAZUH_AGENT_NAME='<agent-name>' \
+              dpkg -i ./wazuh-agent_4.14.1-1_amd64.deb
+    ```
+
+    Replace `<manager-ip>` with the IP address or FQDN of your Wazuh Manager (e.g. `10.20.203.5`), and `<agent-name>` with a unique, descriptive name for this host (e.g. `docker-siua`).
+
+    If `dpkg` reports missing dependencies, fix them with:
+
+    ```bash
+    sudo apt --fix-broken install
+    ```
+
+    ### Start the Agent Service
+
+    <Steps>
+      <Step title="Reload systemd">
+        ```bash
+        systemctl daemon-reload
+        ```
+      </Step>
+
+      <Step title="Enable the service at boot">
+        ```bash
+        systemctl enable wazuh-agent
+        ```
+      </Step>
+
+      <Step title="Start the agent">
+        ```bash
+        systemctl start wazuh-agent
+        ```
+        The agent will automatically enroll with the Manager on port 1515 and begin shipping events on port 1514. It should appear in the Wazuh Dashboard under **Agents** within a few seconds.
+      </Step>
+    </Steps>
+
+    ### Enable Docker Monitoring
+
+    To have the native agent report Docker container events, install the Python Docker SDK and enable the `docker-listener` wodle:
+
+    **1. Install Python dependencies:**
+
+    ```bash
+    sudo apt install python3 python3-pip python3-docker
+    ```
+
+    If the package versions are insufficient for the Wazuh Docker wodle, you can also install via pip (not always required):
+
+    ```bash
+    pip3 install docker==7.1.0 urllib3==1.26.20 requests==2.32.2
+    ```
+
+    **2. Add the docker-listener wodle to `/var/ossec/etc/ossec.conf`:**
+
+    Open the configuration file:
+
+    ```bash
+    sudo nano /var/ossec/etc/ossec.conf
+    ```
+
+    Add the following block inside the root `<ossec_config>` element:
+
+    ```xml
+    <wodle name="docker-listener">
+      <disabled>no</disabled>
+    </wodle>
+    ```
+
+    **3. Restart the agent to apply the change:**
+
+    ```bash
+    sudo systemctl restart wazuh-agent
+    ```
+
+  </Tab>
+</Tabs>
+
+---
+
+## Agent Configuration File
+
+Two `ossec.conf` variants ship with the project, each intended for a different deployment scenario:
+
+<CardGroup cols={2}>
+  <Card title="agent/conf/ossec.conf" icon="server">
+    **For the co-located agent** running alongside the server stack on the same Docker network. Connects to the Manager by its Docker service hostname `wazuh.manager`. The enrollment block does not set an explicit `<agent_name>`, so the container hostname (controlled by `LOCAL_AGENT_HOSTNAME` in `.env`) is used automatically.
+
+    ```xml
+    <client>
+      <server>
+        <address>wazuh.manager</address>
+        <port>1514</port>
+        <protocol>tcp</protocol>
+      </server>
+      <enrollment>
+        <enabled>yes</enabled>
+        <groups>default</groups>
+      </enrollment>
+    </client>
+    ```
+  </Card>
+  <Card title="agent/conf/remote_ossec.conf" icon="satellite-dish">
+    **For remote agents** running on hosts outside the server Docker network. Uses `${HOSTNAME}` as the `<agent_name>` in the enrollment block, which Docker expands to the container hostname at runtime — making each agent's registered name unique.
+
+    ```xml
+    <client>
+      <server>
+        <address>wazuh.manager</address>
+        <port>1514</port>
+        <protocol>tcp</protocol>
+      </server>
+      <enrollment>
+        <enabled>yes</enabled>
+        <agent_name>${HOSTNAME}</agent_name>
+        <groups>default</groups>
+      </enrollment>
+    </client>
+    ```
+  </Card>
+</CardGroup>
+
+Both configuration files enable the `docker-listener` wodle (interval 10 s, 5 attempts, runs on start), the `syscollector` inventory wodle (hardware, OS, network, packages, ports, processes, users, groups, services), `syscheck` file-integrity monitoring with realtime watches on `/etc`, `/usr/bin`, `/usr/sbin`, `/bin`, `/sbin`, and Docker/LXC-specific ignore rules, as well as a suite of active `localfile` monitors for disk usage, memory, running processes, and Docker container status.
+
+---
+
+## Verifying Agent Registration
+
+Once the agent is running and has enrolled, confirm registration through one of these methods:
+
+**Wazuh Dashboard** — navigate to the **Agents** section in the left sidebar. A newly enrolled agent appears within seconds and transitions from `Pending` to `Active` once it starts shipping events.
+
+**REST API** — query the Manager's API directly:
+
+```bash
+curl -sk -u wazuh-wui:<password> https://<manager>:55000/agents
+```
+
+Replace `<password>` with your `API_PASSWORD` value and `<manager>` with the Manager's IP or FQDN. A successful response returns a JSON object listing all registered agents with their IDs, names, IP addresses, and connection status.
+
+**Agent logs** — on a native Linux agent, check the agent's own log for enrollment confirmation:
+
+```bash
+sudo tail -f /var/ossec/logs/ossec.log
+```
+
+Look for lines containing `Connected to the server` and the assigned agent ID.

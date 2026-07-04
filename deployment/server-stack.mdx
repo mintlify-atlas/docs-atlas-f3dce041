@@ -1,0 +1,208 @@
+---
+title: "Deploy the Wazuh Server Stack with Docker Compose"
+sidebarTitle: "Server Stack"
+description: "Deploy Wazuh Indexer, Manager, and Dashboard services using docker-compose.yml or the wazuh-dev.sh script, with pre-deployment checks and resource guidance."
+---
+
+This page walks you through deploying the three server-side Wazuh components — **Wazuh Indexer** (OpenSearch-based data store), **Wazuh Manager** (analysis and correlation engine with Filebeat), and **Wazuh Dashboard** (web UI) — as Docker Compose services on a single host. You can use the convenience script `wazuh-dev.sh` for a guided deployment, or follow the manual steps to drive each stage yourself.
+
+## Prerequisites
+
+Before starting, ensure the following are in place on the target host:
+
+- **Docker Engine 20.10+** and **Docker Compose 2.0+** installed and available in `$PATH`
+- **`vm.max_map_count` ≥ 262144** — required by the OpenSearch-based Indexer. `wazuh-dev.sh` sets this automatically; for manual deployments run:
+  ```bash
+  sudo sysctl -w vm.max_map_count=262144
+  ```
+  To make it persistent across reboots, add `vm.max_map_count=262144` to `/etc/sysctl.conf`.
+- The following **TCP/UDP ports open** and not already bound by another process:
+
+  | Port | Protocol | Service |
+  |------|----------|---------|
+  | 1514 | TCP | Agent event ingestion |
+  | 1515 | TCP | Agent auto-enrollment (authd) |
+  | 514  | UDP | Syslog collection |
+  | 55000 | TCP | Wazuh REST API |
+  | 9200 | TCP | OpenSearch / Wazuh Indexer |
+  | 6443 | TCP | Wazuh Dashboard (maps to internal 5601) |
+
+- A populated `.env` file at the project root (copy from `.env.example` — see [Environment Variables](deployment/environment-variables))
+- TLS certificates generated in `./config/wazuh_indexer_ssl_certs/` (see [Certificates](deployment/certificates))
+
+---
+
+## Using wazuh-dev.sh (Recommended)
+
+The helper script `scripts/wazuh-dev.sh` automates every pre-deployment check and then starts the stack. Run it as root or with `sudo` from the project root:
+
+```bash
+sudo bash scripts/wazuh-dev.sh server up
+```
+
+The script performs the following steps in order:
+
+1. **Sets `vm.max_map_count`** — reads the current value from `/proc/sys/vm/max_map_count` and, if it is below 262144, applies `sysctl -w vm.max_map_count=262144` automatically.
+2. **Validates Docker and curl** — exits with a clear error message if either binary is absent.
+3. **Checks `.env` exists** — if not found, it copies `.env.example` to `.env` and asks you to fill in the values before continuing.
+4. **Verifies required files** — confirms `docker-compose.yml`, `config/wazuh_indexer/internal_users.yml`, `generate-indexer-certs.yml`, and the `SCRIPT_POST_INSTALL` path are all present.
+5. **Resolves `LOCAL_AGENT_HOSTNAME`** — if the value in `.env` is `localhost`, substitutes the actual system FQDN returned by `hostname -f`.
+6. **Updates API credentials in `wazuh.yml`** — writes `API_USERNAME` and `API_PASSWORD` from `.env` into `config/wazuh_dashboard/wazuh.yml`, after validating that neither value contains a `$` character.
+7. **Hashes `MY_PASSWORD` into `internal_users.yml`** — runs the Wazuh Indexer image's built-in `/usr/share/wazuh-indexer/plugins/opensearch-security/tools/hash.sh` to bcrypt-hash the password, then creates or updates the `MY_USERNAME` entry in `config/wazuh_indexer/internal_users.yml`.
+8. **Generates TLS certificates** — runs `docker compose -f generate-indexer-certs.yml run --rm generator` to produce all inter-service certificates.
+9. **Starts the stack** — executes `docker compose -f docker-compose.yml --env-file .env up -d` and tails `docker compose logs -f wazuh-init`.
+
+<Tip>
+  To follow the live logs of a specific service after the stack is running, use:
+  ```bash
+  docker compose logs -f wazuh.manager
+  ```
+  Replace `wazuh.manager` with `wazuh.indexer` or `wazuh.dashboard` as needed.
+</Tip>
+
+---
+
+## Manual Deployment
+
+If you prefer to control each step individually, follow the sequence below.
+
+<Steps>
+  <Step title="Copy and edit the environment file">
+    Copy the example file and open it in an editor to set all required credentials and network values:
+    ```bash
+    cp .env.example .env
+    nano .env
+    ```
+    Refer to the [Environment Variables](deployment/environment-variables) reference for a description of every variable.
+  </Step>
+
+  <Step title="Generate TLS certificates">
+    Run the certificate generator container. It reads `./config/certs.yml` and writes all certificates to `./config/wazuh_indexer_ssl_certs/`:
+    ```bash
+    sudo docker compose -f generate-indexer-certs.yml run --rm generator
+    ```
+    See [Certificates](deployment/certificates) for the full list of generated files and their purposes.
+  </Step>
+
+  <Step title="Start the services">
+    Bring up all three server services in detached mode:
+    ```bash
+    sudo docker compose up -d
+    ```
+    Docker Compose reads the `.env` file automatically from the project root.
+  </Step>
+
+  <Step title="Check service status">
+    Verify that all containers reached a running state and that health checks are passing:
+    ```bash
+    sudo docker compose ps
+    ```
+    The Indexer health check polls `https://localhost:9200` with `INDEXER_USERNAME`/`INDEXER_PASSWORD` credentials. The Manager and Dashboard health checks each poll their respective HTTPS endpoints. Allow up to two minutes for all three services to become healthy on first boot.
+  </Step>
+</Steps>
+
+---
+
+## Service Images and Versions
+
+All images are official Wazuh images from Docker Hub, pinned to version **4.14.5**:
+
+| Service | Container Name | Image |
+|---------|----------------|-------|
+| Wazuh Indexer | `wazuh.indexer` | `wazuh/wazuh-indexer:4.14.5` |
+| Wazuh Manager | `wazuh.manager` | `wazuh/wazuh-manager:4.14.5` |
+| Wazuh Dashboard | `wazuh.dashboard` | `wazuh/wazuh-dashboard:4.14.5` |
+| Wazuh Agent (co-located) | `wazuh.agent` | `wazuh/wazuh-agent:4.14.5` |
+
+All services are configured with `restart: always` so they come back automatically after a host reboot or container crash.
+
+---
+
+## Resource Limits
+
+The `docker-compose.yml` includes commented-out resource constraint blocks for each service. These are disabled by default so you can assess actual usage before enforcing limits. Uncomment the relevant block to enable them.
+
+**Wazuh Indexer** — up to 2 GB memory / 2 vCPUs, with a 1 GB reservation:
+
+```yaml
+# wazuh.indexer
+#deploy:
+#  resources:
+#    limits:
+#      memory: 2G
+#      cpus: "2"
+#    reservations:
+#      memory: 1G
+#      cpus: "1.5"
+```
+
+The Indexer JVM heap is controlled by the active environment variable:
+
+```yaml
+environment:
+  - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+```
+
+Adjust `-Xms` and `-Xmx` together whenever you change memory limits to avoid heap pressure.
+
+**Wazuh Manager** — up to 1.5 GB / 1.5 vCPUs, with a 512 MB reservation:
+
+```yaml
+# wazuh.manager
+#deploy:
+#  resources:
+#    limits:
+#      memory: 1.5G
+#      cpus: "1.5"
+#    reservations:
+#      memory: 512M
+#      cpus: "1.0"
+```
+
+**Wazuh Dashboard** — up to 1 GB / 1 vCPU, with a 512 MB reservation:
+
+```yaml
+# wazuh.dashboard
+#deploy:
+#  resources:
+#    limits:
+#      memory: 1G
+#      cpus: "1.0"
+#    reservations:
+#      memory: 512M
+#      cpus: "0.5"
+```
+
+Each service also has commented-out `ulimits` blocks (`memlock` and `nofile`) that may be needed in high-throughput production environments. Uncomment and tune them alongside the memory limits.
+
+<Warning>
+  The co-located Wazuh agent mounts the host Docker socket **read-only** (`/var/run/docker.sock:/var/run/docker.sock:ro`) and runs with `privileged: true`. The agent container is added to the host's Docker group via the `DOCKER_GID` variable so it can read container events without requiring write access to the socket.
+</Warning>
+
+---
+
+## Stopping and Restarting
+
+**Stop the entire stack** (containers are removed; volumes and data are preserved):
+
+```bash
+sudo docker compose down
+```
+
+**Restart a single service** without affecting the others:
+
+```bash
+sudo docker compose restart wazuh.manager
+```
+
+**Force-recreate all containers** (picks up any `.env` or config changes):
+
+```bash
+sudo docker compose up -d --force-recreate
+```
+
+**Stop and remove everything including named volumes** (⚠ destroys all data):
+
+```bash
+sudo docker compose down -v
+```

@@ -1,0 +1,171 @@
+---
+title: "Configure the Wazuh Dashboard and API Connection"
+sidebarTitle: "Dashboard"
+description: "Reference for opensearch_dashboards.yml and wazuh.yml, covering TLS setup, session management, and the Manager API connection used by the Wazuh Dashboard."
+---
+
+The Wazuh Dashboard is a Wazuh-customized OpenSearch Dashboards instance that provides the web UI for alert exploration, agent management, SCA results, vulnerability reports, and configuration assessment. Two configuration files control its behaviour: `config/wazuh_dashboard/opensearch_dashboards.yml` (server settings and the connection to the Wazuh Indexer) and `config/wazuh_dashboard/wazuh.yml` (the connection settings for the Wazuh Manager REST API). Both files are bind-mounted into the `wazuh.dashboard` container — changes require a container restart.
+
+<Note>
+  The Dashboard container maps internal port **5601** to host port **6443**. Always access the Dashboard at `https://<host>:6443`. Browsing directly to port 5601 on the host will not work unless you modify the port mapping in `docker-compose.yml`.
+</Note>
+
+---
+
+## opensearch_dashboards.yml Reference
+
+This file configures the Dashboard web server, its connection to the Wazuh Indexer, TLS termination, and session handling.
+
+### Server Settings
+
+| Key | Value | Description |
+|---|---|---|
+| `server.host` | `0.0.0.0` | Bind the Dashboard server to all interfaces inside the container |
+| `server.port` | `5601` | Internal port the Dashboard listens on (mapped to host port 6443) |
+| `server.ssl.enabled` | `true` | Serve the Dashboard over HTTPS |
+| `server.ssl.key` | `/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem` | TLS private key for the Dashboard HTTPS certificate |
+| `server.ssl.certificate` | `/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem` | TLS certificate presented to browsers |
+
+### Indexer Connection
+
+| Key | Value | Description |
+|---|---|---|
+| `opensearch.hosts` | `https://wazuh.indexer:9200` | Wazuh Indexer REST API endpoint (Docker internal hostname) |
+| `opensearch.ssl.verificationMode` | `certificate` | Verify the Indexer's certificate against the CA, but do not check the hostname |
+| `opensearch.ssl.certificateAuthorities` | `["/usr/share/wazuh-dashboard/certs/root-ca.pem"]` | Root CA used to verify the Indexer's TLS certificate |
+| `opensearch.requestHeadersWhitelist` | `["securitytenant", "Authorization"]` | Request headers forwarded to the Indexer — required for OpenSearch Security multitenancy and auth header pass-through |
+
+### Security Plugin Settings
+
+| Key | Value | Description |
+|---|---|---|
+| `opensearch_security.multitenancy.enabled` | `false` | Multitenancy (tenant-scoped index namespaces) is disabled — all users share a single index space |
+| `opensearch_security.readonly_mode.roles` | `["kibana_read_only"]` | Users with this role see the Dashboard in read-only mode |
+
+### Default Route
+
+| Key | Value | Description |
+|---|---|---|
+| `uiSettings.overrides.defaultRoute` | `/app/wz-home` | Landing page after login — redirects directly to the Wazuh home screen instead of the OpenSearch Dashboards default |
+
+### Session Settings
+
+| Key | Value | Description |
+|---|---|---|
+| `opensearch_security.cookie.ttl` | `900000` | Cookie lifetime in milliseconds — 900000 ms = **15 minutes** |
+| `opensearch_security.session.ttl` | `900000` | Server-side session lifetime in milliseconds — 900000 ms = **15 minutes** |
+| `opensearch_security.session.keepalive` | `true` | Reset the session TTL on each user interaction, preventing idle timeouts during active use |
+
+---
+
+## Full opensearch_dashboards.yml
+
+```yaml
+server.host: 0.0.0.0
+server.port: 5601
+opensearch.hosts: https://wazuh.indexer:9200
+opensearch.ssl.verificationMode: certificate
+opensearch.requestHeadersWhitelist: ["securitytenant", "Authorization"]
+opensearch_security.multitenancy.enabled: false
+opensearch_security.readonly_mode.roles: ["kibana_read_only"]
+server.ssl.enabled: true
+server.ssl.key: "/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem"
+server.ssl.certificate: "/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem"
+opensearch.ssl.certificateAuthorities:
+  ["/usr/share/wazuh-dashboard/certs/root-ca.pem"]
+uiSettings.overrides.defaultRoute: /app/wz-home
+# Session expiration settings
+opensearch_security.cookie.ttl: 900000
+opensearch_security.session.ttl: 900000
+opensearch_security.session.keepalive: true
+```
+
+---
+
+## wazuh.yml — Manager API Connection
+
+The `wazuh.yml` file tells the Dashboard where to find the Wazuh Manager's REST API and what credentials to use. The Dashboard calls this API to retrieve agent status, configuration, and security event data that are not stored in the Indexer.
+
+<Warning>
+  The `wazuh.yml` file contains the API password **in plaintext**. Ensure the file has restrictive permissions (`chmod 600`) and is not committed to version control with real credentials. The repository ships a templated version — `wazuh-dev.sh` substitutes the actual values from `.env` at deploy time.
+</Warning>
+
+### File Structure
+
+```yaml
+hosts:
+  - 1513629884013:
+      url: "https://wazuh.manager"
+      port: 55000
+      username: wazuh-wui
+      password: T6G.2026#frank.w
+      run_as: false
+```
+
+### Field Reference
+
+| Field | Value | Description |
+|---|---|---|
+| `hosts[].url` | `https://wazuh.manager` | Manager API base URL — uses the Docker internal service hostname |
+| `hosts[].port` | `55000` | Manager REST API port |
+| `hosts[].username` | `wazuh-wui` | API user account — created during stack initialization |
+| `hosts[].password` | *(from `.env`)* | API password — set as `API_PASSWORD` in `.env` and substituted by `wazuh-dev.sh` |
+| `hosts[].run_as` | `false` | Do not impersonate the logged-in Dashboard user when calling the API — use the `wazuh-wui` service account credentials directly |
+
+The numeric key (`1513629884013`) is a host identifier used internally by the Dashboard. It is arbitrary and must be unique if multiple Manager API endpoints are configured.
+
+### Automatic Updates via wazuh-dev.sh
+
+The `wazuh-dev.sh` script automatically keeps `wazuh.yml` in sync with your `.env` file:
+
+1. Reads `API_USERNAME` and `API_PASSWORD` from `.env`
+2. Updates the `username` and `password` fields in `config/wazuh_dashboard/wazuh.yml`
+3. Restarts the Dashboard container so the new credentials take effect
+
+To change the API credentials manually, update both `.env` and `wazuh.yml`, then restart:
+
+```bash
+docker compose restart wazuh.dashboard
+```
+
+---
+
+## Accessing the Dashboard
+
+The Dashboard is available at:
+
+```
+https://<host>:6443
+```
+
+Log in with the credentials set in your `.env` file:
+
+| Variable | Used For |
+|---|---|
+| `DASHBOARD_USERNAME` | Dashboard login username |
+| `DASHBOARD_PASSWORD` | Dashboard login password |
+
+These credentials authenticate against the OpenSearch Security plugin using the `internal_users.yml` database on the Indexer. On first login you will land on the Wazuh home screen (`/app/wz-home`) as set by `uiSettings.overrides.defaultRoute`.
+
+---
+
+## Session Timeout
+
+The default session TTL is **15 minutes** (900,000 ms), controlled by two settings in `opensearch_dashboards.yml`:
+
+- `opensearch_security.cookie.ttl` — the browser cookie expires after this duration
+- `opensearch_security.session.ttl` — the server-side session is invalidated after this duration
+
+With `session.keepalive: true`, the TTL resets on each request, so an actively working user will not be logged out. An idle session will expire after exactly 15 minutes.
+
+To change the timeout, edit both values to the same millisecond duration in `config/wazuh_dashboard/opensearch_dashboards.yml` and restart the container:
+
+```bash
+# Example: increase session timeout to 60 minutes (3600000 ms)
+opensearch_security.cookie.ttl: 3600000
+opensearch_security.session.ttl: 3600000
+```
+
+```bash
+docker compose restart wazuh.dashboard
+```

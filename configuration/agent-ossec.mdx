@@ -1,0 +1,301 @@
+---
+title: "Wazuh Agent ossec.conf: Monitoring Capabilities Reference"
+sidebarTitle: "Agent Config"
+description: "Reference for the agent ossec.conf files covering Docker monitoring, file integrity, SCA, system inventory, active monitoring commands, and log collection."
+---
+
+Two `ossec.conf` variants are provided for Wazuh agents in this deployment. `agent/conf/ossec.conf` is used for the co-located agent that runs on the same Docker host as the Wazuh stack — it connects to the Manager using the Docker service hostname `wazuh.manager`. `agent/conf/remote_ossec.conf` is for agents installed on external hosts — it adds `<agent_name>${HOSTNAME}</agent_name>` to the enrollment block so each remote agent registers with its own system hostname. Both files are otherwise identical in terms of monitoring capabilities.
+
+<Note>
+  Rootcheck ignores `/var/lib/containerd` and `/var/lib/docker/overlay2` on all agents. Without these exclusions, rootcheck would generate a high volume of false-positive alerts from the constantly-changing overlay filesystem layers used by Docker containers.
+</Note>
+
+---
+
+## Client Connection Settings
+
+<Tabs>
+  <Tab title="Co-located Agent">
+    The co-located agent connects directly to the `wazuh.manager` Docker service hostname, which resolves within the Docker network:
+
+    ```xml
+    <client>
+      <server>
+        <address>wazuh.manager</address>
+        <port>1514</port>
+        <protocol>tcp</protocol>
+      </server>
+      <config-profile>ubuntu, ubuntu22, ubuntu22.04</config-profile>
+      <notify_time>20</notify_time>
+      <time-reconnect>60</time-reconnect>
+      <auto_restart>yes</auto_restart>
+      <crypto_method>aes</crypto_method>
+      <enrollment>
+        <enabled>yes</enabled>
+        <groups>default</groups>
+        <authorization_pass_path>etc/authd.pass</authorization_pass_path>
+      </enrollment>
+    </client>
+    ```
+
+    The agent name is derived automatically from the system hostname at enrollment time.
+  </Tab>
+  <Tab title="Remote Agent">
+    Remote agents supply their hostname explicitly via the `${HOSTNAME}` environment variable at enrollment time. The server address is supplied at deploy time — set `AGENT_MANAGER_SERVER` in the agent's environment or substitute it in the config before deploying:
+
+    ```xml
+    <client>
+      <server>
+        <address>wazuh.manager</address>
+        <port>1514</port>
+        <protocol>tcp</protocol>
+      </server>
+      <config-profile>ubuntu, ubuntu22, ubuntu22.04</config-profile>
+      <notify_time>20</notify_time>
+      <time-reconnect>60</time-reconnect>
+      <auto_restart>yes</auto_restart>
+      <crypto_method>aes</crypto_method>
+      <enrollment>
+        <enabled>yes</enabled>
+        <agent_name>${HOSTNAME}</agent_name>
+        <groups>default</groups>
+        <authorization_pass_path>etc/authd.pass</authorization_pass_path>
+      </enrollment>
+    </client>
+    ```
+
+    Replace `wazuh.manager` with the external IP address or FQDN of the Wazuh Manager host when deploying to remote hosts.
+  </Tab>
+</Tabs>
+
+### Connection Parameter Reference
+
+| Parameter | Value | Description |
+|---|---|---|
+| `port` | `1514` | Manager TCP port for agent event forwarding |
+| `protocol` | `tcp` | Transport protocol — TCP ensures reliable delivery |
+| `notify_time` | `20` | Seconds between keep-alive heartbeats sent to the Manager |
+| `time-reconnect` | `60` | Seconds to wait before attempting reconnection after a lost connection |
+| `auto_restart` | `yes` | Automatically restart the agent process if it exits unexpectedly |
+| `crypto_method` | `aes` | AES-256 encryption for all agent-to-manager traffic |
+| `enrollment.enabled` | `yes` | Use the auto-enrollment protocol (authd) instead of manual key import |
+| `enrollment.groups` | `default` | Assign the agent to the `default` group on enrollment |
+
+**Client Buffer**
+
+| Parameter | Value | Description |
+|---|---|---|
+| `disabled` | `no` | Event buffering is active |
+| `queue_size` | `5000` | Maximum events held in the agent's outbound queue |
+| `events_per_second` | `500` | Maximum event dispatch rate to the Manager |
+
+---
+
+## Wodles (Extension Modules)
+
+<AccordionGroup>
+
+  <Accordion title="Docker Listener">
+    The `docker-listener` wodle subscribes to the Docker daemon event stream on the agent host and forwards container lifecycle events to the Manager as Wazuh alerts.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `disabled` | `no` | Docker monitoring is active |
+    | `interval` | `10` | Polling interval in seconds when event streaming is unavailable |
+    | `attempts` | `5` | Number of connection attempts before the wodle backs off |
+    | `run_on_start` | `yes` | Begin monitoring immediately on agent startup |
+
+    Events captured include: container `start`, `stop`, `die`, `pause`, `unpause`, `create`, and `destroy`. These appear in the Wazuh Dashboard under **Threat Intelligence → Docker Listener**.
+  </Accordion>
+
+  <Accordion title="System Inventory (syscollector)">
+    Syscollector collects a comprehensive hardware and software inventory of the agent host and pushes it to the Indexer for storage and search.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `disabled` | `no` | Syscollector is active |
+    | `interval` | `1h` | Full inventory scan every hour |
+    | `scan_on_start` | `yes` | Run a scan immediately on agent startup |
+    | `hardware` | `yes` | CPU, memory, and system board details |
+    | `os` | `yes` | Operating system name, version, and kernel |
+    | `network` | `yes` | Network interfaces, IP addresses, and routes |
+    | `packages` | `yes` | Installed package list (dpkg/apt) |
+    | `ports` (all=yes) | `yes` | All open ports, including non-listening sockets |
+    | `processes` | `yes` | Running process list |
+    | `users` | `yes` | Local user accounts |
+    | `groups` | `yes` | Local groups and their membership |
+    | `services` | `yes` | Systemd service states |
+    | `browser_extensions` | `yes` | Installed browser extensions (Chrome/Firefox) |
+    | `max_eps` | `10` | Maximum inventory events per second sent to the Indexer |
+
+    The agent's syscollector also enables vulnerability detection — the Manager cross-references the collected package list against CVE feeds to identify vulnerable software installed on each agent host.
+  </Accordion>
+
+  <Accordion title="CIS-CAT (disabled)">
+    The CIS-CAT wodle integrates with the CIS-CAT Pro Assessor to run detailed CIS benchmark compliance scans. It is currently **disabled** in this deployment — the CIS-CAT jar file and Java runtime are not installed on agent hosts.
+
+    ```xml
+    <wodle name="cis-cat">
+      <disabled>yes</disabled>
+      <timeout>1800</timeout>
+      <interval>1d</interval>
+      <scan-on-start>yes</scan-on-start>
+      <java_path>wodles/java</java_path>
+      <ciscat_path>wodles/ciscat</ciscat_path>
+    </wodle>
+    ```
+  </Accordion>
+
+  <Accordion title="Osquery (disabled)">
+    The Osquery wodle forwards Osquery result logs to the Manager for rule-based analysis. It is currently **disabled** — Osquery is not installed on agent hosts.
+
+    ```xml
+    <wodle name="osquery">
+      <disabled>yes</disabled>
+      <run_daemon>yes</run_daemon>
+      <log_path>/var/log/osquery/osqueryd.results.log</log_path>
+      <config_path>/etc/osquery/osquery.conf</config_path>
+      <add_labels>yes</add_labels>
+    </wodle>
+    ```
+  </Accordion>
+
+</AccordionGroup>
+
+---
+
+## Security Configuration Assessment (SCA)
+
+SCA evaluates the agent host's configuration against a security benchmark and reports each check result as a pass, fail, or not applicable finding.
+
+| Parameter | Value | Description |
+|---|---|---|
+| `enabled` | `yes` | SCA is active |
+| `scan_on_start` | `yes` | Run a full policy scan at agent startup |
+| `interval` | `12h` | Re-scan every 12 hours |
+| `skip_nfs` | `yes` | Skip NFS-mounted paths during policy checks |
+| `policy` | `cis_ubuntu22-04.yml` | **CIS Ubuntu 22.04 LTS Benchmark** — the built-in policy file covering system hardening, user accounts, network settings, and service configuration |
+
+SCA results are visible in the Wazuh Dashboard under **Security Configuration Assessment** for each agent. Failed checks include remediation guidance linked to the CIS benchmark control ID.
+
+---
+
+## File Integrity Monitoring (syscheck)
+
+Syscheck monitors the agent's filesystem for unauthorized changes and alerts when file content, permissions, ownership, or attributes are modified.
+
+### Scan Settings
+
+| Parameter | Value | Description |
+|---|---|---|
+| `frequency` | `43200` | Full filesystem scan every 12 hours |
+| `scan_on_start` | `yes` | Run an immediate scan on agent startup |
+| `process_priority` | `10` | Run at lower CPU scheduling priority (nice value 10) |
+| `max_eps` | `50` | Maximum FIM events per second to avoid overwhelming the Manager |
+| `skip_nfs` | `yes` | Skip NFS-mounted directories |
+| `skip_dev` | `yes` | Skip `/dev` device files |
+| `skip_proc` | `yes` | Skip `/proc` process filesystem |
+| `skip_sys` | `yes` | Skip `/sys` kernel interface filesystem |
+
+### Monitored Directories
+
+| Path | Attributes | Notes |
+|---|---|---|
+| `/etc`, `/usr/bin`, `/usr/sbin` | Default checks | System configuration and administrative binaries (periodic scan) |
+| `/bin`, `/sbin`, `/boot` | Default checks | Core binaries and bootloader (periodic scan) |
+| `/etc` | `check_all`, `realtime` | Critical config directory — also monitored in real-time for instant alerts |
+| `/usr/bin`, `/usr/sbin` | `check_all`, `realtime` | Administrative binaries — real-time monitoring |
+| `/bin`, `/sbin` | `check_all`, `realtime` | Core binaries — real-time monitoring |
+| `/var/lib/lxc` | `check_all`, `realtime` | LXC container definitions and configs (Proxmox hosts) |
+| `/etc/pve` | `check_all`, `realtime` | Proxmox VE cluster configuration (Proxmox hosts) |
+
+Real-time monitoring uses Linux inotify events to generate alerts within seconds of a change, without waiting for the next periodic scan cycle.
+
+### Ignored Paths
+
+The following paths are excluded from FIM to reduce noise from legitimately and frequently updated files:
+
+| Path | Reason |
+|---|---|
+| `/etc/mtab` | Updated on every mount/unmount operation |
+| `/etc/hosts.deny` | Modified by active-response rules |
+| `/etc/mail/statistics` | Updated by mail delivery agents |
+| `/etc/random-seed` | Refreshed on each boot/shutdown |
+| `/etc/random.seed` | Refreshed on each boot/shutdown |
+| `/etc/adjtime` | Updated by hardware clock sync |
+| `/etc/httpd/logs` | Log directory (high write frequency) |
+| `/etc/utmpx` | Login tracking file |
+| `/etc/wtmpx` | Login history file |
+| `/etc/cups/certs` | Printer certificate directory |
+| `/etc/dumpdates` | Updated after each filesystem dump |
+| `/etc/svc/volatile` | Volatile service runtime state |
+| `*.log` (regex) | Log files (all directories) |
+| `*.swp` (regex) | Editor swap files (all directories) |
+
+`/etc/ssl/private.key` is monitored for changes but content diff is suppressed via `<nodiff>` — alerts fire if the file is modified, but the key material never appears in alert data.
+
+### Synchronization
+
+| Parameter | Value | Description |
+|---|---|---|
+| `enabled` | `yes` | FIM database synchronization with Manager is active |
+| `interval` | `5m` | Sync the agent's local FIM database with the Manager every 5 minutes |
+| `max_eps` | `10` | Maximum synchronization events per second |
+
+---
+
+## Active Monitoring Commands
+
+These `<localfile>` command entries run system commands on a schedule and forward their output to the Manager for analysis and alerting.
+
+| Alias | Command | Format | Frequency | Description |
+|---|---|---|---|---|
+| *(none)* | `df -P` | `command` | 360s | Disk utilization per filesystem (POSIX format) |
+| `netstat listening ports` | `netstat -tulpn \| sed ...` | `full_command` | 360s | Active TCP/UDP listeners with port and process |
+| *(none)* | `last -n 20` | `full_command` | 360s | Last 20 login sessions |
+| `Uptime` | `uptime` | `full_command` | 3600s | System uptime and 1/5/15-minute load averages |
+| `Disk Usage` | `df -h` | `full_command` | 3600s | Human-readable disk utilization per filesystem |
+| `Memory Usage` | `free -m` | `full_command` | 300s | RAM and swap utilization in megabytes |
+| `Process List` | `ps aux --sort=-%cpu \| head -20` | `full_command` | 300s | Top 20 processes by CPU consumption |
+| `Docker Status` | `docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"` | `full_command` | 300s | Running containers with name, status, and image |
+
+Command output is received by the Manager as log events and evaluated against the Wazuh ruleset. Disk usage warnings, unexpected process appearances, and Docker container state changes can all trigger alerts.
+
+---
+
+## Log Sources
+
+These `<localfile>` syslog entries configure the agent to tail standard Linux log files and stream their content to the Manager for rule-based analysis.
+
+| Source | Format | Description |
+|---|---|---|
+| `journald` | `journald` | Systemd journal — covers all systemd-managed services |
+| `/var/ossec/logs/active-responses.log` | `syslog` | Record of active response actions taken on this host |
+| `/var/log/dpkg.log` | `syslog` | Debian package installation, removal, and upgrade events |
+| `/var/log/syslog` | `syslog` | General system messages |
+| `/var/log/auth.log` | `syslog` | Authentication events — SSH logins, sudo, PAM |
+| `/var/log/apt/history.log` | `syslog` | APT package manager history |
+
+The `auth.log` source is particularly important for detecting brute-force SSH attacks, privilege escalation via sudo, and failed authentication attempts — Wazuh's built-in rules generate alerts for repeated failures and suspicious patterns.
+
+---
+
+## Active Response
+
+The agent's active response block enables the agent to receive and execute response commands dispatched by the Manager.
+
+```xml
+<active-response>
+  <disabled>no</disabled>
+  <ca_store>etc/wpk_root.pem</ca_store>
+  <ca_verification>yes</ca_verification>
+</active-response>
+```
+
+| Parameter | Value | Description |
+|---|---|---|
+| `disabled` | `no` | Active response is enabled — this agent will execute Manager-dispatched actions |
+| `ca_store` | `etc/wpk_root.pem` | CA certificate used to verify the integrity of WPK (Wazuh Package) files before execution |
+| `ca_verification` | `yes` | Verify WPK file signatures against the CA — prevents execution of tampered response scripts |
+
+Active response commands configured on the Manager (such as `firewall-drop` or `host-deny`) will be executed on this agent when matching alert conditions are triggered.

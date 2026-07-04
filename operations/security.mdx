@@ -1,0 +1,251 @@
+---
+title: "Security Hardening for the Wazuh Docker Stack"
+sidebarTitle: "Security"
+description: "Security hardening checklist for production Wazuh deployments: credential rotation, firewall configuration, TLS, volume permissions, and access controls."
+---
+
+Before exposing the Wazuh stack to a network, complete this security checklist to harden your deployment against common attack vectors. The default values in `.env.example` are intentionally illustrative — they must be replaced with strong, unique credentials before the stack handles any real monitored infrastructure.
+
+<Warning>
+  Never run the Wazuh stack with the default credentials from `.env.example` in production. The example file ships with well-known username/password pairs that are widely documented and trivially exploited.
+</Warning>
+
+---
+
+## Credential Rotation
+
+Rotate all stack credentials whenever you provision a new environment, after a suspected compromise, or on your organization's regular credential-rotation schedule.
+
+<Steps>
+  <Step title="Edit .env with strong unique passwords">
+    Open `.env` and replace every credential with a strong, randomly generated value:
+
+    ```bash
+    # Example: generate a random 24-character password (no $ character)
+    openssl rand -base64 18 | tr -d '$/'
+    ```
+
+    Update the following variables:
+
+    | Variable | Purpose |
+    |---|---|
+    | `INDEXER_PASSWORD` | Password for the OpenSearch `admin` user |
+    | `API_PASSWORD` | Password for the Wazuh REST API user (`wazuh-wui`) |
+    | `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` | Dashboard internal service account |
+    | `MY_PASSWORD` | Password for your custom admin user (hashed into `internal_users.yml`) |
+  </Step>
+
+  <Step title="Rotate the Indexer admin hash">
+    The password for any user defined in `config/wazuh_indexer/internal_users.yml` must be stored as a bcrypt hash. Run `wazuh-dev.sh server up` — the script calls the Indexer's built-in `hash.sh` tool via `docker run` and automatically upserts the new hash for `MY_USERNAME` into `internal_users.yml`:
+
+    ```bash
+    sudo bash scripts/wazuh-dev.sh server up
+    ```
+
+    The relevant portion of the script that performs this step:
+
+    ```bash
+    MY_HASH=$(docker run --rm wazuh/wazuh-indexer:4.14.5 \
+      /usr/share/wazuh-indexer/plugins/opensearch-security/tools/hash.sh \
+      -p "$MY_PASSWORD")
+    ```
+  </Step>
+
+  <Step title="Verify the Dashboard API connection is updated">
+    `wazuh-dev.sh` automatically syncs `config/wazuh_dashboard/wazuh.yml` with the `API_USERNAME` and `API_PASSWORD` values from `.env` using a `sed` in-place substitution. Confirm the update was applied:
+
+    ```bash
+    grep -E 'username:|password:' config/wazuh_dashboard/wazuh.yml
+    ```
+
+    The output should reflect your new `API_USERNAME` and `API_PASSWORD` values.
+  </Step>
+
+  <Step title="Restart the stack">
+    Bring the stack down and back up so all services pick up the new credentials and regenerated certs:
+
+    ```bash
+    sudo docker compose down
+    sudo docker compose up -d
+    ```
+
+    Or simply let `wazuh-dev.sh server up` handle the full cycle including cert regeneration.
+  </Step>
+
+  <Step title="Verify login at the Dashboard">
+    Open a browser and navigate to `https://<host>:6443`. Log in with your updated credentials to confirm the rotation was successful. Check for "Could not connect to the Wazuh API" errors — if present, see [Troubleshooting](/operations/troubleshooting).
+  </Step>
+</Steps>
+
+---
+
+## Password Policy
+
+Apply the following requirements to every credential stored in `.env` and `internal_users.yml`:
+
+- **Minimum length:** 16 characters
+- **Complexity:** mix of uppercase, lowercase, digits, and symbols
+- **Forbidden character:** the `$` character is **not allowed** in `API_PASSWORD` or `API_USERNAME` — `wazuh-dev.sh` validates this and will exit with an error if it is present, because `$` interferes with the shell variable expansion used during `wazuh.yml` credential injection
+- **Uniqueness:** use a different password for every role (`INDEXER_PASSWORD`, `API_PASSWORD`, `DASHBOARD_PASSWORD`, `MY_PASSWORD`)
+- **Storage:** all passwords stored in `internal_users.yml` must be bcrypt hashes — never store plain text passwords in that file
+
+<Note>
+  The `reserved: true` flag on the `admin` and `kibanaserver` users in `internal_users.yml` prevents them from being deleted through the API. Custom users added by `wazuh-dev.sh` use `reserved: false` and can be managed via the Security plugin UI.
+</Note>
+
+---
+
+## Firewall Configuration
+
+The `docker-compose.yml` exposes the following ports on the host. Lock them down to the minimum required network scope using `ufw`, `nftables`, or your cloud security group.
+
+| Port | Protocol | Purpose | Recommendation |
+|---|---|---|---|
+| 6443 | TCP | Dashboard UI (HTTPS) | Restrict to admin IPs or VPN subnet |
+| 55000 | TCP | Wazuh REST API | Restrict to trusted management hosts only |
+| 9200 | TCP | Indexer (OpenSearch) API | Internal use only — block from all external hosts |
+| 1514 | TCP | Agent event communication | Allow only from monitored host subnets |
+| 1515 | TCP | Agent auto-enrollment | Allow only from monitored host subnets |
+| 514 | UDP | Syslog ingestion | Allow only from designated log sources |
+
+**Example `ufw` rules:**
+
+```bash
+# Allow agents to communicate with the Manager
+sudo ufw allow from <agent-subnet>/24 to any port 1514
+sudo ufw allow from <agent-subnet>/24 to any port 1515
+
+# Allow syslog from known log sources only
+sudo ufw allow from <syslog-source-ip> to any port 514 proto udp
+
+# Allow Dashboard access from admin IP only
+sudo ufw allow from <admin-ip> to any port 6443
+
+# Block Indexer API and REST API from all external access
+sudo ufw deny 9200
+sudo ufw deny 55000
+
+# Enable the firewall
+sudo ufw enable
+sudo ufw status verbose
+```
+
+<Warning>
+  Docker manipulates `iptables` directly and can bypass `ufw` rules for ports published with `-p`. If you are relying solely on `ufw`, use `DOCKER-USER` chain rules or bind published ports to `127.0.0.1` in `docker-compose.yml` (e.g., `"127.0.0.1:9200:9200"`) so they are not reachable externally regardless of ufw state.
+</Warning>
+
+---
+
+## TLS / HTTPS
+
+**Default behavior:** `wazuh-dev.sh server up` runs `docker compose -f generate-indexer-certs.yml run --rm generator` to produce self-signed certificates in `./config/wazuh_indexer_ssl_certs/`. These certs secure all inter-service communication (Manager ↔ Indexer via Filebeat, Dashboard ↔ Indexer) and are generated fresh on each `wazuh-dev.sh` invocation.
+
+The certs are mounted at the following paths inside each container:
+
+| Container | Cert files mounted |
+|---|---|
+| `wazuh.indexer` | `root-ca.pem`, `wazuh.indexer.pem`, `wazuh.indexer-key.pem`, `admin.pem`, `admin-key.pem` |
+| `wazuh.manager` | `root-ca-manager.pem`, `wazuh.manager.pem`, `wazuh.manager-key.pem` |
+| `wazuh.dashboard` | `root-ca.pem`, `wazuh.dashboard.pem`, `wazuh.dashboard-key.pem` |
+
+**For production deployments with a corporate CA or Let's Encrypt:**
+
+1. Obtain certificates for each service node using your CA or ACME client.
+2. Name the files to match the expected filenames listed in `docker-compose.yml` volume mounts (e.g., `wazuh.indexer.pem`, `wazuh.indexer-key.pem`).
+3. Place all certs in `./config/wazuh_indexer_ssl_certs/`.
+4. Restart the stack: `sudo docker compose down && sudo docker compose up -d`.
+
+<Note>
+  The Wazuh Dashboard serves its own self-signed certificate to browsers on port `6443`. This will trigger browser security warnings — this is expected behavior. Accept the exception or install the `root-ca.pem` into your browser's or OS's trusted certificate store to suppress the warning.
+</Note>
+
+---
+
+## Volume and File Permissions
+
+Several files on the host contain sensitive credentials and must be protected from world-readable access:
+
+```bash
+# Protect the .env file — readable only by root/owner
+chmod 600 .env
+
+# Protect wazuh.yml — contains API_USERNAME and API_PASSWORD in plain text
+chmod 600 config/wazuh_dashboard/wazuh.yml
+
+# Protect the SSL certs directory
+chmod 700 config/wazuh_indexer_ssl_certs/
+
+# Verify
+ls -la .env config/wazuh_dashboard/wazuh.yml config/wazuh_indexer_ssl_certs/
+```
+
+**Version control hygiene:**
+
+- Add `.env` to `.gitignore` — it must never be committed.
+- Add `config/wazuh_indexer_ssl_certs/` to `.gitignore` — private keys must never be committed.
+- The `.env.example` file is safe to commit as a template (it contains only illustrative placeholder values).
+
+---
+
+## Whitelist Configuration (Active Response)
+
+The Manager's active-response module can automatically block source IPs that trigger high-severity rules using the `firewall-drop` command. To prevent accidentally blocking your own management hosts, add them to the whitelist in `config/wazuh_cluster/wazuh_manager.conf`.
+
+The default whitelist in the deployed configuration:
+
+```xml
+<!-- Active response whitelist — from wazuh_manager.conf -->
+<global>
+  <white_list>127.0.0.1</white_list>
+  <white_list>^localhost.localdomain$</white_list>
+</global>
+```
+
+To add your management jump host or admin subnet, append additional `<white_list>` entries to the same `<global>` block:
+
+```xml
+<global>
+  <white_list>127.0.0.1</white_list>
+  <white_list>^localhost.localdomain$</white_list>
+  <!-- Add management IPs to prevent accidental firewall-drop -->
+  <white_list>10.20.203.5</white_list>
+  <white_list>^admin-jumphost.simovilab.local$</white_list>
+</global>
+```
+
+After editing the config, restart the Manager to apply: `sudo docker compose restart wazuh.manager`.
+
+<Warning>
+  Do not whitelist broad CIDR ranges or entire subnets unless you trust all hosts in that range unconditionally. A whitelisted IP is immune to all active-response blocking, including `firewall-drop`.
+</Warning>
+
+---
+
+## Disabling Default Accounts
+
+The `config/wazuh_indexer/internal_users.yml` file ships with several demo accounts that are not needed in most production deployments:
+
+| Account | Backend Role | Used by |
+|---|---|---|
+| `kibanaro` | `kibanauser`, `readall` | Legacy Kibana read-only demo user |
+| `logstash` | `logstash` | Logstash pipeline ingestion (not used in this stack) |
+| `readall` | `readall` | Read-only API demo user |
+| `snapshotrestore` | `snapshotrestore` | Index snapshot/restore operations |
+
+If these accounts are not required, disable them by removing their `backend_roles` and setting `reserved: false`. You can also simply omit the entries from the file entirely since `wazuh-dev.sh` will preserve only the entries present at deployment time.
+
+Example — disabling `kibanaro`:
+
+```yaml
+kibanaro:
+  hash: "$2a$12$JJSXNfTowz7Uu5ttXfeYpeYE0arACvcwlPBStB1F.MI7f0U9Z4DGC"
+  reserved: false
+  # backend_roles removed — account is effectively disabled
+  description: "Disabled demo kibanaro user"
+```
+
+After editing `internal_users.yml`, run `sudo bash scripts/wazuh-dev.sh server up` to apply the changes (the script mounts the file directly into the Indexer container on start).
+
+<Tip>
+  Subscribe to the Wazuh security advisories at [https://wazuh.com/security](https://wazuh.com/security) to stay informed about vulnerabilities in Wazuh components and receive timely notification of recommended image updates.
+</Tip>

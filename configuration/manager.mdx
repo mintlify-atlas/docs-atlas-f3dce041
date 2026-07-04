@@ -1,0 +1,639 @@
+---
+title: "Configure the Wazuh Manager: ossec.conf Reference"
+sidebarTitle: "Manager"
+description: "Reference guide for config/wazuh_cluster/wazuh_manager.conf covering global settings, FIM, SCA, vulnerability detection, active response, and cluster configuration."
+---
+
+The Wazuh Manager's primary configuration file lives at `config/wazuh_cluster/wazuh_manager.conf` in the repository. It is bind-mounted into the `wazuh.manager` container at `/wazuh-config-mount/etc/ossec.conf`. Any change to this file requires a container restart to take effect:
+
+```bash
+docker compose restart wazuh.manager
+```
+
+The file is composed of multiple `<ossec_config>` blocks, each grouping related settings. The sections below document every block in the order they appear in the file.
+
+<Note>
+  The `docker-listener` wodle is enabled on the Manager. This means the Manager itself monitors Docker daemon events directly — container start, stop, pause, and die events are forwarded to the indexer as Wazuh alerts without requiring a separate agent on the Docker host.
+</Note>
+
+---
+
+## Configuration Sections
+
+<AccordionGroup>
+
+  <Accordion title="Global Settings (&#60;global&#62;)">
+    The `<global>` block controls alerting output formats, email notifications, and agent disconnection behaviour.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `jsonout_output` | `yes` | Write alerts to `alerts.json` in JSON format |
+    | `alerts_log` | `yes` | Write alerts to `alerts.log` in plain text |
+    | `logall` | `yes` | Archive all received events, not just those that match rules |
+    | `logall_json` | `yes` | Archive all events in JSON format |
+    | `email_notification` | `no` | Email alerting is disabled by default |
+    | `smtp_server` | `smtp.example.wazuh.com` | SMTP server (used when email is enabled) |
+    | `email_from` | `wazuh@example.wazuh.com` | Sender address for email alerts |
+    | `email_to` | `recipient@example.wazuh.com` | Recipient address for email alerts |
+    | `email_maxperhour` | `12` | Maximum emails sent per hour |
+    | `email_log_source` | `alerts.log` | Log file used as the email alert source |
+    | `agents_disconnection_time` | `10m` | Time after which a silent agent is considered disconnected |
+    | `agents_disconnection_alert_time` | `0` | Delay before firing the disconnection alert (0 = immediate) |
+
+    A second `<global>` block later in the file defines the active-response IP whitelist:
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `white_list` | `127.0.0.1` | Loopback address is never blocked by active response |
+    | `white_list` | `^localhost.localdomain$` | Localhost hostname is never blocked |
+  </Accordion>
+
+  <Accordion title="Alerts">
+    The `<alerts>` block sets threshold levels for log and email output.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `log_alert_level` | `3` | Minimum rule severity level written to `alerts.log` and `alerts.json` |
+    | `email_alert_level` | `12` | Minimum rule severity level that triggers an email notification |
+
+    Wazuh rule levels range from 0 (informational) to 15 (critical). Setting `log_alert_level: 3` keeps low-noise informational events out of the alerts files. The email threshold of 12 means only high-severity events generate emails.
+  </Accordion>
+
+  <Accordion title="Agent Communication (&#60;remote&#62;)">
+    The `<remote>` block defines how the Manager accepts incoming connections from enrolled agents.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `connection` | `secure` | Encrypted, authenticated agent-to-manager communication |
+    | `port` | `1514` | TCP port the Manager listens on for agent traffic |
+    | `protocol` | `tcp` | Transport protocol |
+    | `queue_size` | `131072` | Internal event queue depth (number of events buffered before processing) |
+
+    Port 1514/TCP must be reachable from all agent hosts. In the Docker Compose stack this port is published on the host and agents connect to it directly.
+  </Accordion>
+
+  <Accordion title="Rootcheck (Policy Monitoring)">
+    Rootcheck performs host-based anomaly and policy checks — scanning for rootkits, suspicious files, hidden processes, and configuration issues.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `disabled` | `no` | Rootcheck is active |
+    | `check_files` | `yes` | Scan for suspicious files using the rootkit database |
+    | `check_trojans` | `yes` | Compare binaries against the known-trojan list |
+    | `check_dev` | `yes` | Scan `/dev` for unusual device files |
+    | `check_sys` | `yes` | Check system call entries and `/proc` |
+    | `check_pids` | `yes` | Detect hidden processes |
+    | `check_ports` | `yes` | Detect hidden network ports |
+    | `check_if` | `yes` | Check network interfaces for promiscuous mode |
+    | `frequency` | `43200` | Run every 12 hours |
+    | `rootkit_files` | `etc/rootcheck/rootkit_files.txt` | Rootkit file signatures database |
+    | `rootkit_trojans` | `etc/rootcheck/rootkit_trojans.txt` | Trojan signatures database |
+    | `skip_nfs` | `yes` | Skip NFS-mounted directories to avoid slow scans |
+  </Accordion>
+
+  <Accordion title="System Inventory (syscollector wodle)">
+    The `syscollector` wodle periodically collects a hardware and software inventory of the Manager host and forwards it to the Indexer for storage and search.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `disabled` | `no` | Syscollector is active |
+    | `interval` | `1h` | Full inventory scan every hour |
+    | `scan_on_start` | `yes` | Run an inventory scan immediately on Wazuh startup |
+    | `hardware` | `yes` | Collect CPU, memory, and board details |
+    | `os` | `yes` | Collect OS name, version, and kernel |
+    | `network` | `yes` | Collect network interfaces, addresses, and routes |
+    | `packages` | `yes` | Collect installed package list |
+    | `ports` (all=yes) | `yes` | Collect all open ports, including non-listening ones |
+    | `processes` | `yes` | Collect running process list |
+    | `max_eps` | `10` | Maximum inventory events sent per second to avoid indexer overload |
+  </Accordion>
+
+  <Accordion title="Security Configuration Assessment (SCA)">
+    SCA runs policy checks against configuration benchmarks and reports compliance failures as alerts.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `enabled` | `yes` | SCA is active |
+    | `scan_on_start` | `yes` | Run a full policy scan at startup |
+    | `interval` | `12h` | Re-scan every 12 hours |
+    | `skip_nfs` | `yes` | Skip NFS-mounted paths during scanning |
+
+    The Manager uses the built-in policy files from `ruleset/sca/`. To add custom policies, place `.yml` files in `etc/shared/` on the Manager and reference them from agent group configurations.
+  </Accordion>
+
+  <Accordion title="Vulnerability Detection">
+    The vulnerability detection engine correlates the syscollector package inventory against CVE feeds to identify vulnerable software versions.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `enabled` | `yes` | Vulnerability detection is active |
+    | `index-status` | `yes` | Index vulnerability status records in the Wazuh Indexer |
+    | `feed-update-interval` | `60m` | Refresh CVE feeds every 60 minutes |
+
+    The Manager connects to the Wazuh Indexer over `https://wazuh.indexer:9200` using the certificates configured in the `<indexer>` block:
+
+    | TLS Setting | Path |
+    |---|---|
+    | CA certificate | `/etc/ssl/root-ca.pem` |
+    | Client certificate | `/etc/ssl/filebeat.pem` |
+    | Client key | `/etc/ssl/filebeat.key` |
+  </Accordion>
+
+  <Accordion title="File Integrity Monitoring (syscheck)">
+    Syscheck monitors files and directories for unexpected changes, generating alerts when content, permissions, or ownership are modified.
+
+    **Scan Settings**
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `frequency` | `43200` | Full scan every 12 hours |
+    | `scan_on_start` | `yes` | Run an immediate scan on startup |
+    | `alert_new_files` | `yes` | Alert when a new file appears in a monitored directory |
+    | `auto_ignore` | `no` (freq=10, timeframe=3600) | Never auto-ignore frequently changed files |
+    | `process_priority` | `10` | Nice value — run at lower CPU priority |
+    | `max_eps` | `100` | Maximum FIM events per second |
+    | `skip_nfs` | `yes` | Skip NFS mounts |
+    | `skip_dev` | `yes` | Skip `/dev` |
+    | `skip_proc` | `yes` | Skip `/proc` |
+    | `skip_sys` | `yes` | Skip `/sys` |
+
+    **Monitored Directories**
+
+    | Path | Notes |
+    |---|---|
+    | `/etc`, `/usr/bin`, `/usr/sbin` | System configuration and administrative binaries |
+    | `/bin`, `/sbin`, `/boot` | Core binaries and bootloader files |
+
+    **Ignored Paths**
+
+    The following paths are excluded from FIM to reduce alert noise from files that change legitimately:
+
+    | Ignored Path | Reason |
+    |---|---|
+    | `/etc/mtab` | Updated on every mount/unmount |
+    | `/etc/hosts.deny` | Modified by active-response rules |
+    | `/etc/mail/statistics` | Mail statistics updated frequently |
+    | `/etc/random-seed` | Updated on shutdown/boot |
+    | `/etc/random.seed` | Updated on shutdown/boot |
+    | `/etc/adjtime` | Updated by hardware clock synchronization |
+    | `/etc/httpd/logs` | Log directory (high-frequency writes) |
+    | `/etc/utmpx` | Login record file |
+    | `/etc/wtmpx` | Login record file |
+    | `/etc/cups/certs` | Printer certificates |
+    | `/etc/dumpdates` | Updated after each dump |
+    | `/etc/svc/volatile` | Volatile service state |
+    | `*.log`, `*.swp` (regex) | Log and editor swap files |
+
+    **Nodiff**
+
+    `/etc/ssl/private.key` is monitored for changes but its content is never included in alerts — the diff is suppressed to prevent private key material from appearing in logs.
+
+    **Synchronization**
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `enabled` | `yes` | Database synchronization is active |
+    | `interval` | `5m` | Sync the FIM database every 5 minutes |
+    | `max_interval` | `1h` | Maximum interval between forced syncs |
+    | `max_eps` | `10` | Maximum sync events per second |
+  </Accordion>
+
+  <Accordion title="Active Response Commands">
+    These `<command>` blocks define the executables available for active response rules. Commands are referenced by name in `<active-response>` rule blocks.
+
+    | Command Name | Executable | Timeout Allowed | Description |
+    |---|---|---|---|
+    | `disable-account` | `disable-account` | `yes` | Lock a local user account |
+    | `restart-wazuh` | `restart-wazuh` | — | Restart the Wazuh agent on the target host |
+    | `firewall-drop` | `firewall-drop` | `yes` | Block an IP via iptables/firewalld |
+    | `host-deny` | `host-deny` | `yes` | Add an IP to `/etc/hosts.deny` |
+    | `route-null` | `route-null` | `yes` | Null-route an IP (Linux) |
+    | `win_route-null` | `route-null.exe` | `yes` | Null-route an IP (Windows) |
+    | `netsh` | `netsh.exe` | `yes` | Block an IP with Windows netsh firewall |
+
+    <Note>
+      The `<active-response>` trigger block is currently commented out in `wazuh_manager.conf`. To activate automated blocking, uncomment and configure it with the command name, location, level threshold, and optional timeout. See the [Wazuh active response documentation](https://documentation.wazuh.com/current/user-manual/capabilities/active-response/index.html) for rule configuration examples.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Log Analysis (localfile)">
+    Three `<localfile>` entries configure the Manager to periodically run system commands and treat their output as log events for analysis.
+
+    | Command | Format | Frequency | Description |
+    |---|---|---|---|
+    | `df -P` | `command` | 360s | Disk utilization per filesystem in POSIX format |
+    | `netstat -tulpn \| sed ...` | `full_command` | 360s | Listening TCP/UDP ports, aliased as `netstat listening ports` |
+    | `last -n 20` | `full_command` | 360s | Last 20 login entries |
+
+    A separate `<ossec_config>` block appends the active responses log as a syslog source:
+
+    | Location | Format | Description |
+    |---|---|---|
+    | `/var/ossec/logs/active-responses.log` | `syslog` | Records every active response action taken by the Manager |
+  </Accordion>
+
+  <Accordion title="Ruleset">
+    The `<ruleset>` block tells the Manager where to find decoder and rule files.
+
+    **Decoders**
+
+    | Path | Type |
+    |---|---|
+    | `ruleset/decoders` | Wazuh built-in decoders |
+    | `etc/decoders` | User-defined custom decoders |
+
+    **Rules**
+
+    | Path | Type |
+    |---|---|
+    | `ruleset/rules` | Wazuh built-in rules |
+    | `etc/rules` | User-defined custom rules |
+
+    **Excluded Rule File**
+
+    `0215-policy_rules.xml` is excluded from loading. This file contains legacy policy rules superseded by the SCA engine — excluding it prevents duplicate alerts.
+
+    **CDB Lists**
+
+    | List | Usage |
+    |---|---|
+    | `etc/lists/audit-keys` | Auditd key identifiers |
+    | `etc/lists/amazon/aws-eventnames` | AWS CloudTrail event names |
+    | `etc/lists/security-eventchannel` | Windows Security event channel IDs |
+    | `etc/lists/malicious-ioc/malicious-ip` | Known malicious IP addresses |
+    | `etc/lists/malicious-ioc/malicious-domains` | Known malicious domain names |
+    | `etc/lists/malicious-ioc/malware-hashes` | Malware file hashes |
+
+    **Rule Tester**
+
+    The `<rule_test>` block enables the interactive rule testing engine (used by `ossec-logtest`):
+
+    | Parameter | Value |
+    |---|---|
+    | `enabled` | `yes` |
+    | `threads` | `1` |
+    | `max_sessions` | `64` |
+    | `session_timeout` | `15m` |
+  </Accordion>
+
+  <Accordion title="Agent Authentication (&#60;auth&#62;)">
+    The `<auth>` block configures `wazuh-authd`, the agent registration daemon.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `disabled` | `no` | Authd is running |
+    | `port` | `1515` | TCP port agents connect to for enrollment |
+    | `use_source_ip` | `no` | Register agents by name, not source IP |
+    | `purge` | `yes` | Remove deleted agent keys from the keystore |
+    | `use_password` | `no` | No shared password required for enrollment |
+    | `ciphers` | `HIGH:!ADH:!EXP:!MD5:!RC4:!3DES:!CAMELLIA:@STRENGTH` | OpenSSL cipher string — strong ciphers only |
+    | `ssl_verify_host` | `no` | Agent's hostname is not verified against its certificate CN |
+    | `ssl_manager_cert` | `etc/sslmanager.cert` | Manager's TLS certificate for authd |
+    | `ssl_manager_key` | `etc/sslmanager.key` | Manager's TLS private key for authd |
+    | `ssl_auto_negotiate` | `no` | Do not auto-negotiate SSL version |
+  </Accordion>
+
+  <Accordion title="Cluster Configuration">
+    The `<cluster>` block defines the Wazuh cluster identity for this node.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `name` | `wazuh` | Cluster name — must match on all nodes |
+    | `node_name` | `node01` | Unique name for this node |
+    | `node_type` | `master` | This node is the cluster master |
+    | `port` | `1516` | TCP port for inter-node cluster communication |
+    | `bind_addr` | `0.0.0.0` | Listen on all interfaces |
+    | `nodes > node` | `wazuh.manager` | List of cluster node addresses |
+    | `hidden` | `no` | Node is visible in cluster status |
+    | `disabled` | `yes` | Clustering is **disabled** — single-node deployment |
+
+    <Tip>
+      This is a single-node deployment. To enable a multi-node cluster, set `<disabled>no</disabled>`, add worker node addresses to the `<nodes>` list, and ensure the same `<key>` is configured on all nodes. Worker nodes must have `<node_type>worker</node_type>` set in their own `<cluster>` blocks.
+    </Tip>
+  </Accordion>
+
+</AccordionGroup>
+
+---
+
+## Full Configuration File
+
+The complete `wazuh_manager.conf` for reference:
+
+```xml expandable
+<ossec_config>
+  <global>
+    <jsonout_output>yes</jsonout_output>
+    <alerts_log>yes</alerts_log>
+    <logall>yes</logall>
+    <logall_json>yes</logall_json>
+    <email_notification>no</email_notification>
+    <smtp_server>smtp.example.wazuh.com</smtp_server>
+    <email_from>wazuh@example.wazuh.com</email_from>
+    <email_to>recipient@example.wazuh.com</email_to>
+    <email_maxperhour>12</email_maxperhour>
+    <email_log_source>alerts.log</email_log_source>
+    <agents_disconnection_time>10m</agents_disconnection_time>
+    <agents_disconnection_alert_time>0</agents_disconnection_alert_time>
+  </global>
+
+  <alerts>
+    <log_alert_level>3</log_alert_level>
+    <email_alert_level>12</email_alert_level>
+  </alerts>
+
+  <!-- Choose between "plain", "json", or "plain,json" for the format of internal logs -->
+  <logging>
+    <log_format>plain</log_format>
+  </logging>
+
+  <remote>
+    <connection>secure</connection>
+    <port>1514</port>
+    <protocol>tcp</protocol>
+    <queue_size>131072</queue_size>
+  </remote>
+
+  <!-- Policy monitoring -->
+  <rootcheck>
+    <disabled>no</disabled>
+    <check_files>yes</check_files>
+    <check_trojans>yes</check_trojans>
+    <check_dev>yes</check_dev>
+    <check_sys>yes</check_sys>
+    <check_pids>yes</check_pids>
+    <check_ports>yes</check_ports>
+    <check_if>yes</check_if>
+
+    <!-- Frequency that rootcheck is executed - every 12 hours -->
+    <frequency>43200</frequency>
+
+    <rootkit_files>etc/rootcheck/rootkit_files.txt</rootkit_files>
+    <rootkit_trojans>etc/rootcheck/rootkit_trojans.txt</rootkit_trojans>
+
+    <skip_nfs>yes</skip_nfs>
+  </rootcheck>
+
+  <wodle name="cis-cat">
+    <disabled>yes</disabled>
+    <timeout>1800</timeout>
+    <interval>1d</interval>
+    <scan-on-start>yes</scan-on-start>
+
+    <java_path>wodles/java</java_path>
+    <ciscat_path>wodles/ciscat</ciscat_path>
+  </wodle>
+
+  <!-- Osquery integration -->
+  <wodle name="osquery">
+    <disabled>yes</disabled>
+    <run_daemon>yes</run_daemon>
+    <log_path>/var/log/osquery/osqueryd.results.log</log_path>
+    <config_path>/etc/osquery/osquery.conf</config_path>
+    <add_labels>yes</add_labels>
+  </wodle>
+
+  <wodle name="docker-listener">
+    <disabled>no</disabled>
+  </wodle>
+
+  <!-- System inventory -->
+  <wodle name="syscollector">
+    <disabled>no</disabled>
+    <interval>1h</interval>
+    <scan_on_start>yes</scan_on_start>
+    <hardware>yes</hardware>
+    <os>yes</os>
+    <network>yes</network>
+    <packages>yes</packages>
+    <ports all="yes">yes</ports>
+    <processes>yes</processes>
+
+    <!-- Database synchronization settings -->
+    <synchronization>
+      <max_eps>10</max_eps>
+    </synchronization>
+  </wodle>
+
+  <sca>
+    <enabled>yes</enabled>
+    <scan_on_start>yes</scan_on_start>
+    <interval>12h</interval>
+    <skip_nfs>yes</skip_nfs>
+  </sca>
+
+  <vulnerability-detection>
+    <enabled>yes</enabled>
+    <index-status>yes</index-status>
+    <feed-update-interval>60m</feed-update-interval>
+  </vulnerability-detection>
+
+  <indexer>
+    <enabled>yes</enabled>
+    <hosts>
+      <host>https://wazuh.indexer:9200</host>
+    </hosts>
+    <ssl>
+      <certificate_authorities>
+        <ca>/etc/ssl/root-ca.pem</ca>
+      </certificate_authorities>
+      <certificate>/etc/ssl/filebeat.pem</certificate>
+      <key>/etc/ssl/filebeat.key</key>
+    </ssl>
+  </indexer>
+
+  <!-- File integrity monitoring -->
+  <syscheck>
+    <disabled>no</disabled>
+
+    <!-- Frequency that syscheck is executed default every 12 hours -->
+    <frequency>43200</frequency>
+
+    <scan_on_start>yes</scan_on_start>
+
+    <!-- Generate alert when new file detected -->
+    <alert_new_files>yes</alert_new_files>
+
+    <!-- Don't ignore files that change more than 'frequency' times -->
+    <auto_ignore frequency="10" timeframe="3600">no</auto_ignore>
+
+    <!-- Directories to check  (perform all possible verifications) -->
+    <directories>/etc,/usr/bin,/usr/sbin</directories>
+    <directories>/bin,/sbin,/boot</directories>
+
+    <!-- Files/directories to ignore -->
+    <ignore>/etc/mtab</ignore>
+    <ignore>/etc/hosts.deny</ignore>
+    <ignore>/etc/mail/statistics</ignore>
+    <ignore>/etc/random-seed</ignore>
+    <ignore>/etc/random.seed</ignore>
+    <ignore>/etc/adjtime</ignore>
+    <ignore>/etc/httpd/logs</ignore>
+    <ignore>/etc/utmpx</ignore>
+    <ignore>/etc/wtmpx</ignore>
+    <ignore>/etc/cups/certs</ignore>
+    <ignore>/etc/dumpdates</ignore>
+    <ignore>/etc/svc/volatile</ignore>
+
+    <!-- File types to ignore -->
+    <ignore type="sregex">.log$|.swp$</ignore>
+
+    <!-- Check the file, but never compute the diff -->
+    <nodiff>/etc/ssl/private.key</nodiff>
+
+    <skip_nfs>yes</skip_nfs>
+    <skip_dev>yes</skip_dev>
+    <skip_proc>yes</skip_proc>
+    <skip_sys>yes</skip_sys>
+
+    <!-- Nice value for Syscheck process -->
+    <process_priority>10</process_priority>
+
+    <!-- Maximum output throughput -->
+    <max_eps>100</max_eps>
+
+    <!-- Database synchronization settings -->
+    <synchronization>
+      <enabled>yes</enabled>
+      <interval>5m</interval>
+      <max_interval>1h</max_interval>
+      <max_eps>10</max_eps>
+    </synchronization>
+  </syscheck>
+
+  <!-- Active response -->
+  <global>
+    <white_list>127.0.0.1</white_list>
+    <white_list>^localhost.localdomain$</white_list>
+  </global>
+
+  <command>
+    <name>disable-account</name>
+    <executable>disable-account</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+
+  <command>
+    <name>restart-wazuh</name>
+    <executable>restart-wazuh</executable>
+  </command>
+
+  <command>
+    <name>firewall-drop</name>
+    <executable>firewall-drop</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+
+  <command>
+    <name>host-deny</name>
+    <executable>host-deny</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+
+  <command>
+    <name>route-null</name>
+    <executable>route-null</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+
+  <command>
+    <name>win_route-null</name>
+    <executable>route-null.exe</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+
+  <command>
+    <name>netsh</name>
+    <executable>netsh.exe</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+
+  <!--
+  <active-response>
+    active-response options here
+  </active-response>
+  -->
+
+  <!-- Log analysis -->
+  <localfile>
+    <log_format>command</log_format>
+    <command>df -P</command>
+    <frequency>360</frequency>
+  </localfile>
+
+  <localfile>
+    <log_format>full_command</log_format>
+    <command>netstat -tulpn | sed 's/\([[:alnum:]]\+\)\ \+[[:digit:]]\+\ \+[[:digit:]]\+\ \+\(.*\):\([[:digit:]]*\)\ \+\([0-9\.:\*]\+\).\+\ \([[:digit:]]*\/[[:alnum:]\-]*\).*/\1 \2 == \3 == \4 \5/' | sort -k 4 -g | sed 's/ == \(.*\) ==/:\1/' | sed 1,2d</command>
+    <alias>netstat listening ports</alias>
+    <frequency>360</frequency>
+  </localfile>
+
+  <localfile>
+    <log_format>full_command</log_format>
+    <command>last -n 20</command>
+    <frequency>360</frequency>
+  </localfile>
+
+  <ruleset>
+    <!-- Default ruleset -->
+    <decoder_dir>ruleset/decoders</decoder_dir>
+    <rule_dir>ruleset/rules</rule_dir>
+    <rule_exclude>0215-policy_rules.xml</rule_exclude>
+    <list>etc/lists/audit-keys</list>
+    <list>etc/lists/amazon/aws-eventnames</list>
+    <list>etc/lists/security-eventchannel</list>
+    <list>etc/lists/malicious-ioc/malicious-ip</list>
+    <list>etc/lists/malicious-ioc/malicious-domains</list>
+    <list>etc/lists/malicious-ioc/malware-hashes</list>
+
+    <!-- User-defined ruleset -->
+    <decoder_dir>etc/decoders</decoder_dir>
+    <rule_dir>etc/rules</rule_dir>
+  </ruleset>
+
+  <rule_test>
+    <enabled>yes</enabled>
+    <threads>1</threads>
+    <max_sessions>64</max_sessions>
+    <session_timeout>15m</session_timeout>
+  </rule_test>
+
+  <!-- Configuration for wazuh-authd -->
+  <auth>
+    <disabled>no</disabled>
+    <port>1515</port>
+    <use_source_ip>no</use_source_ip>
+    <purge>yes</purge>
+    <use_password>no</use_password>
+    <ciphers>HIGH:!ADH:!EXP:!MD5:!RC4:!3DES:!CAMELLIA:@STRENGTH</ciphers>
+    <!-- <ssl_agent_ca></ssl_agent_ca> -->
+    <ssl_verify_host>no</ssl_verify_host>
+    <ssl_manager_cert>etc/sslmanager.cert</ssl_manager_cert>
+    <ssl_manager_key>etc/sslmanager.key</ssl_manager_key>
+    <ssl_auto_negotiate>no</ssl_auto_negotiate>
+  </auth>
+
+  <cluster>
+    <name>wazuh</name>
+    <node_name>node01</node_name>
+    <node_type>master</node_type>
+    <key>aa093264ef885029653eea20dfcf51ae</key>
+    <port>1516</port>
+    <bind_addr>0.0.0.0</bind_addr>
+    <nodes>
+        <node>wazuh.manager</node>
+    </nodes>
+    <hidden>no</hidden>
+    <disabled>yes</disabled>
+  </cluster>
+
+</ossec_config>
+
+<ossec_config>
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/ossec/logs/active-responses.log</location>
+  </localfile>
+
+</ossec_config>
+```

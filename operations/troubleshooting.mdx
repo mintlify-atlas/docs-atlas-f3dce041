@@ -1,0 +1,399 @@
+---
+title: "Troubleshoot the Wazuh Docker Stack"
+sidebarTitle: "Troubleshooting"
+description: "Diagnose and resolve common issues with the Wazuh Docker Stack: startup failures, agent connectivity, certificate errors, and performance problems."
+---
+
+This page covers common problems encountered when deploying and operating the Wazuh Docker Stack, with diagnostic commands and resolution steps for each issue. Problems are grouped by symptom — use `docker compose ps` and `docker compose logs` to identify which container is unhealthy, then jump to the relevant section below.
+
+<Tip>
+  Always check `docker compose ps` first — the container health status (`healthy` / `unhealthy` / `starting`) narrows down the failure domain quickly and tells you which service's logs to focus on.
+</Tip>
+
+---
+
+<AccordionGroup>
+
+  <Accordion title="Indexer fails to start — vm.max_map_count too low">
+    **Symptom:** The `wazuh.indexer` container exits immediately after starting. Logs contain the message:
+
+    ```
+    max virtual memory areas vm.max_map_count [65530] is too low, increase to at least [262144]
+    ```
+
+    **Cause:** OpenSearch (which powers the Wazuh Indexer) requires the Linux kernel parameter `vm.max_map_count` to be at least `262144`. The default value on most Linux distributions is `65530`.
+
+    **Fix:**
+
+    ```bash
+    # Apply the setting immediately (takes effect without reboot)
+    sudo sysctl -w vm.max_map_count=262144
+
+    # Persist the setting across reboots
+    echo 'vm.max_map_count=262144' | sudo tee -a /etc/sysctl.conf
+
+    # Verify the current value
+    sysctl vm.max_map_count
+
+    # Restart the Indexer container
+    sudo docker compose restart wazuh.indexer
+
+    # Confirm the Indexer is now healthy
+    sudo docker compose ps wazuh.indexer
+    ```
+
+    <Note>
+      `wazuh-dev.sh server up` automatically sets `vm.max_map_count=262144` before starting the stack. If you start the stack directly with `docker compose up -d`, you are responsible for setting this parameter first.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Dashboard cannot connect to Manager API">
+    **Symptom:** After logging into the Dashboard at `https://<host>:6443`, a banner appears: **"Could not connect to the Wazuh API"** or the Wazuh plugin shows no data.
+
+    **Cause:** `config/wazuh_dashboard/wazuh.yml` contains stale or incorrect API credentials or URL. This file is the Dashboard's configuration for reaching the Manager REST API.
+
+    **Diagnosis:**
+
+    ```bash
+    # Confirm the Manager API is reachable and responding
+    curl -sk https://localhost:55000
+
+    # Check the credentials currently in wazuh.yml
+    grep -E 'username:|password:|url:' config/wazuh_dashboard/wazuh.yml
+
+    # Compare against what is in .env
+    grep -E 'API_USERNAME|API_PASSWORD' .env
+    ```
+
+    **Fix:**
+
+    Run `wazuh-dev.sh` to re-sync `wazuh.yml` from `.env` and restart the Dashboard:
+
+    ```bash
+    sudo bash scripts/wazuh-dev.sh server up
+    ```
+
+    Or manually restart just the Dashboard after verifying the credentials match:
+
+    ```bash
+    sudo docker compose restart wazuh.dashboard
+    sudo docker compose logs -f wazuh.dashboard
+    ```
+
+    <Note>
+      Remember: the `$` character is not allowed in `API_PASSWORD` or `API_USERNAME`. If either value contains `$`, `wazuh-dev.sh` will reject it — choose a password without that character.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Agent not appearing in Dashboard">
+    **Symptom:** An agent was enrolled but shows "Never connected" in the Dashboard, or the agent does not appear in the agents list at all.
+
+    **Cause:** Network connectivity issues between the agent and the Manager on ports `1514` (event forwarding) or `1515` (enrollment), or a `WAZUH_MANAGER_SERVER` misconfiguration inside the agent container.
+
+    **Diagnosis:**
+
+    ```bash
+    # Test port reachability from the agent host to the Manager
+    nc -zv <manager-ip> 1514
+    nc -zv <manager-ip> 1515
+
+    # Check agent container logs for connection errors
+    sudo docker compose logs -f wazuh.agent
+
+    # Verify the Manager enrollment service is running
+    docker exec wazuh.manager /var/ossec/bin/wazuh-control status
+
+    # Check registered agents from the Manager API
+    TOKEN=$(curl -k -s -u "wazuh-wui:MyS3cr37P450r.*-" \
+      -X POST "https://localhost:55000/security/user/authenticate?raw=true")
+    curl -k -s -H "Authorization: Bearer $TOKEN" \
+      https://localhost:55000/agents | python3 -m json.tool
+    ```
+
+    **Fix:**
+
+    1. Ensure ports `1514` and `1515` are open in your firewall — see [Security](/operations/security) for `ufw` examples.
+    2. Verify `WAZUH_MANAGER_SERVER` in `.env` or the agent `docker-compose-agent.yml` points to the correct IP or hostname of the Manager host. In `docker-compose.yml`, the agent is configured with `WAZUH_MANAGER_SERVER=wazuh.manager` (the Docker service hostname) — this works when agent and Manager share the same Compose network. For remote agents, set this to the Manager host's actual IP or FQDN.
+    3. If agents appear with "Never connected," verify the Manager `wazuh-authd` daemon is running (port `1515`) and that `<use_password>no</use_password>` or the correct PSK is set in `wazuh_manager.conf`.
+  </Accordion>
+
+  <Accordion title="Certificate errors between services">
+    **Symptom:** Manager or Dashboard container logs contain TLS handshake errors such as:
+
+    ```
+    SSL routines:ssl3_read_bytes:sslv3 alert certificate unknown
+    x509: certificate signed by unknown authority
+    TLS handshake failed
+    ```
+
+    **Cause:** Certificates were not generated, the node names in `certs.yml` do not match the actual Docker service hostnames, or the cert/key pair is mismatched.
+
+    **Fix:**
+
+    Regenerate all certificates from scratch:
+
+    ```bash
+    # Stop the stack
+    sudo docker compose down
+
+    # Remove stale certs
+    rm -rf config/wazuh_indexer_ssl_certs/
+
+    # Regenerate using the certs generator compose file
+    sudo docker compose -f generate-indexer-certs.yml run --rm generator
+
+    # Confirm certs were created
+    ls config/wazuh_indexer_ssl_certs/
+
+    # Restart the stack
+    sudo docker compose up -d
+    ```
+
+    **Verify node name alignment:**
+
+    Open `config/certs.yml` (used by `generate-indexer-certs.yml`) and confirm the node names match the Docker service hostnames exactly:
+
+    - Indexer node name must match the `hostname` field in `docker-compose.yml` — `wazuh.indexer`
+    - Manager node name — `wazuh.manager`
+    - Dashboard node name — `wazuh.dashboard`
+
+    <Note>
+      `wazuh-dev.sh server up` always regenerates certs before starting the stack, so running it is equivalent to the manual steps above.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Indexer API returns 401 Unauthorized">
+    **Symptom:** Queries to the Indexer return `401 Unauthorized`:
+
+    ```bash
+    curl -k -u admin:SecretPassword https://localhost:9200
+    # {"status":401,"error":"..."}
+    ```
+
+    **Cause:** The plain-text `INDEXER_PASSWORD` in `.env` does not match the bcrypt hash stored for the `admin` user in `config/wazuh_indexer/internal_users.yml`. The Indexer's OpenSearch Security plugin validates credentials by comparing the provided password against the hash on every request.
+
+    **Diagnosis:**
+
+    ```bash
+    # Check the hash stored for admin
+    grep -A3 "^admin:" config/wazuh_indexer/internal_users.yml
+
+    # Check the INDEXER_PASSWORD in .env
+    grep INDEXER_PASSWORD .env
+    ```
+
+    **Fix:**
+
+    The `admin` user's hash in `internal_users.yml` is set at image build time and corresponds to the default value. If you changed `INDEXER_PASSWORD` in `.env` without regenerating the hash, the two will be out of sync.
+
+    Option A — restore `INDEXER_PASSWORD` to the value that matches the current hash in `internal_users.yml`.
+
+    Option B — use `wazuh-dev.sh` to update `MY_USERNAME`/`MY_PASSWORD` (your custom admin user), and use those credentials instead of `admin` for API calls:
+
+    ```bash
+    sudo bash scripts/wazuh-dev.sh server up
+    ```
+
+    This rehashes `MY_PASSWORD` and upserts the user into `internal_users.yml` with `admin` backend role, so you can authenticate as `MY_USERNAME` with the correct password.
+  </Accordion>
+
+  <Accordion title='wazuh-dev.sh exits with "$ character not allowed"'>
+    **Symptom:** Running `sudo bash scripts/wazuh-dev.sh server up` prints:
+
+    ```
+    ❌  Error: Character "$" it is not allowed on API_PASSWORD.
+    ```
+
+    or
+
+    ```
+    ❌  Error: Character "$" it is not allowed on API_USERNAME.
+    ```
+
+    **Cause:** The `API_PASSWORD` or `API_USERNAME` value in `.env` contains a `$` character. The script uses `sed` to inject these values into `config/wazuh_dashboard/wazuh.yml`; a `$` in the replacement string is interpreted as a back-reference by `sed` and causes the substitution to fail or produce incorrect output. The script validates this upfront and exits early.
+
+    **Fix:**
+
+    Edit `.env` and choose a new password for `API_PASSWORD` (and/or `API_USERNAME`) that does not contain `$`:
+
+    ```bash
+    # Generate a safe random password (removes $ and / characters)
+    openssl rand -base64 18 | tr -d '$/'
+    ```
+
+    Update `.env`:
+
+    ```bash
+    API_PASSWORD=NewSafePasswordWithout$
+    ```
+
+    Then re-run:
+
+    ```bash
+    sudo bash scripts/wazuh-dev.sh server up
+    ```
+  </Accordion>
+
+  <Accordion title="Docker socket permission denied (agent)">
+    **Symptom:** The `wazuh.agent` container fails to start or the docker-listener wodle logs show permission errors accessing `/var/run/docker.sock`:
+
+    ```
+    permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
+    ```
+
+    **Cause:** The agent container joins the host's `docker` group via `group_add: ["${DOCKER_GID}"]` in `docker-compose.yml`. If `DOCKER_GID` in `.env` does not match the actual GID of the `docker` group on the host, the container's process will not have permission to read the socket.
+
+    **Diagnosis:**
+
+    ```bash
+    # Find the actual Docker group GID on the host
+    getent group docker | cut -d: -f3
+
+    # Compare to what is set in .env
+    grep DOCKER_GID .env
+    ```
+
+    **Fix:**
+
+    Update `DOCKER_GID` in `.env` to match the host value:
+
+    ```bash
+    DOCKER_GID=990   # replace 990 with your actual Docker GID
+    ```
+
+    Then restart the agent:
+
+    ```bash
+    sudo docker compose up -d --force-recreate wazuh.agent
+    ```
+
+    <Note>
+      `wazuh-dev.sh` auto-detects the Docker GID using `getent group docker | cut -d: -f3` and exports it before running `docker compose up`. If you use `wazuh-dev.sh`, the GID mismatch is resolved automatically at deploy time.
+    </Note>
+  </Accordion>
+
+  <Accordion title="High memory usage / OOM kills">
+    **Symptom:** The host runs out of memory; Docker kills one or more containers (visible in `dmesg` as OOM kill events). `docker stats` shows the Indexer consuming most available RAM.
+
+    **Cause:** The Wazuh Indexer (OpenSearch) JVM heap is set to `1g/-Xms1g -Xmx1g` via the `OPENSEARCH_JAVA_OPTS` environment variable in `docker-compose.yml`. Under load — many agents, high event throughput, or large indices — total memory consumption can significantly exceed the JVM heap allocation due to OS page cache and native off-heap buffers.
+
+    **Diagnosis:**
+
+    ```bash
+    # Check live memory consumption per container
+    docker stats --no-stream
+
+    # Check for OOM kill events on the host
+    sudo dmesg | grep -i "oom\|killed"
+    ```
+
+    **Fix:**
+
+    1. **Set resource limits** — uncomment the `deploy.resources.limits` block in `docker-compose.yml` for each service. Example for the Indexer:
+
+       ```yaml
+       wazuh.indexer:
+         # ...
+         deploy:
+           resources:
+             limits:
+               memory: 2G
+               cpus: "2"
+             reservations:
+               memory: 1G
+               cpus: "1.5"
+       ```
+
+    2. **Tune the JVM heap** — adjust `OPENSEARCH_JAVA_OPTS` in `docker-compose.yml` to match available RAM (rule of thumb: no more than 50% of host RAM, max 31 GB):
+
+       ```yaml
+       environment:
+         - "OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g"
+       ```
+
+    3. **Minimum host RAM recommendation:** 8 GB for the full stack (Manager + Indexer + Dashboard + Agent). 16 GB is recommended for production workloads with more than 50 agents.
+
+    4. Apply changes and restart:
+
+       ```bash
+       sudo docker compose up -d --force-recreate
+       ```
+  </Accordion>
+
+  <Accordion title="Wazuh Dashboard takes a long time to load">
+    **Symptom:** After starting the stack, the Dashboard at `https://<host>:6443` takes 1–2 minutes to respond or shows a blank page / loading spinner before becoming usable.
+
+    **Cause:** This is expected behavior on first start. The OpenSearch (Indexer) initialization sequence — security plugin bootstrapping, index template loading, and cluster health check — must complete before the Dashboard can establish a working connection. The Dashboard's health check (`curl -sk https://localhost:5601/api/status`) is configured with `retries: 10` and `interval: 10s`, giving OpenSearch up to ~100 seconds to become ready.
+
+    **Diagnosis:**
+
+    ```bash
+    # Check Dashboard container health status
+    sudo docker compose ps wazuh.dashboard
+
+    # Poll the Dashboard status endpoint directly
+    curl -sk https://localhost:5601/api/status | python3 -m json.tool
+
+    # Check Indexer cluster health — wait for "status": "green"
+    curl -k -u admin:SecretPassword \
+      https://localhost:9200/_cluster/health?pretty
+
+    # Watch all container health statuses in real time
+    watch -n 5 "sudo docker compose ps"
+    ```
+
+    **Resolution:**
+
+    Wait for the Indexer cluster health to reach `green` status before considering the Dashboard broken. If the Dashboard is still unreachable after 5 minutes:
+
+    ```bash
+    # Check for errors in Dashboard logs
+    sudo docker compose logs --tail=50 wazuh.dashboard
+
+    # Check for errors in Indexer logs
+    sudo docker compose logs --tail=50 wazuh.indexer
+
+    # Restart Dashboard if Indexer is healthy but Dashboard is stuck
+    sudo docker compose restart wazuh.dashboard
+    ```
+  </Accordion>
+
+</AccordionGroup>
+
+---
+
+## Collecting Diagnostic Information
+
+When opening a support request or filing a bug report, run the following commands and attach their output:
+
+```bash
+# Container status and health
+docker compose ps
+
+# Last 200 log lines per service
+docker compose logs --tail=200 wazuh.manager  > manager.log
+docker compose logs --tail=200 wazuh.indexer  > indexer.log
+docker compose logs --tail=200 wazuh.dashboard > dashboard.log
+docker compose logs --tail=200 wazuh.agent    > agent.log
+
+# Real-time resource usage snapshot
+docker stats --no-stream
+
+# Kernel parameters
+sysctl vm.max_map_count
+
+# Docker version information
+docker version
+docker compose version
+
+# Host OS and kernel
+uname -a
+cat /etc/os-release
+```
+
+Bundle all log files into a single archive for easy sharing:
+
+```bash
+tar czf wazuh-diagnostics-$(date +%Y%m%d-%H%M%S).tar.gz \
+  manager.log indexer.log dashboard.log agent.log
+```
